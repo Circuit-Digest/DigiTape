@@ -2,7 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body - Digi-Tape Tool Dual Sensor & OLED Demo
+  * @brief          : Main program body - Digi-Tape Tool Complete Telemetry
   ******************************************************************************
   * @attention
   *
@@ -27,6 +27,7 @@
 #include "scl3300.h"
 #include "vl53lx_api.h"
 #include "oled.h"
+#include <stdbool.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -59,6 +60,8 @@ SCL3300_HandleTypeDef scl_dev;
 VL53LX_Dev_t          vl53_dev;
 VL53LX_DEV            p_vl53 = &vl53_dev;
 OLED_HandleTypeDef    oled_dev;
+
+bool                  laser_active = false;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -115,20 +118,23 @@ int main(void)
   MX_USB_Device_Init();
 
   /* USER CODE BEGIN 2 */
-  // 1. Hardware Reset & Boot Pulse for VL53L4CX via PC11 (XSHUT)
+  // 1. Initial State: Keep CAT4002A EN (PA4) LOW (Laser OFF)
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
+
+  // 2. Hardware Reset & Boot Pulse for VL53L4CX via PC11 (XSHUT)
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET); // Hold XSHUT low
   HAL_Delay(50);                                         // Hold reset low
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET);   // Drive XSHUT high
   HAL_Delay(100);                                        // Boot delay for ToF internal MCU initialization
 
-  // 2. Allow USB CDC port to enumerate on PC terminal
+  // 3. Allow USB CDC port to enumerate on PC terminal
   HAL_Delay(1500);
 
   printf("\r\n===============================================\r\n");
-  printf("  STM32G491 DIGITAL MEASUREMENT DEVICE DEMO    \r\n");
+  printf("  STM32G491 DIGI-TAPE TOOL FULL SYSTEM DEMO    \r\n");
   printf("===============================================\r\n");
 
-  // 3. Initialize OLED Display (I2C2 on PA8/PA9)
+  // 4. Initialize OLED Display (I2C2 on PA8/PA9)
   printf("[INIT] Initializing 1.3\" OLED Display on I2C2 (PA8/PA9)...\r\n");
   bool oled_ok = OLED_Init(&oled_dev, &hi2c2);
   if (oled_ok) {
@@ -142,7 +148,7 @@ int main(void)
       printf(" -> [WARN] OLED Display Not Detected on I2C2\r\n");
   }
 
-  // 4. Initialize SCL3300 Inclinometer (SPI1)
+  // 5. Initialize SCL3300 Inclinometer (SPI1)
   printf("[INIT] Initializing SCL3300 SPI1 (CS: PA3)...\r\n");
   bool scl_ok = SCL3300_Init(&scl_dev, &hspi1, GPIOA, GPIO_PIN_3, 4);
   if (scl_ok) {
@@ -151,7 +157,7 @@ int main(void)
       printf(" -> [WARN] SCL3300 Init Warning (WHOAMI: 0x%02X)\r\n", scl_dev.whoami);
   }
 
-  // 5. Initialize VL53L4CX Distance Sensor (I2C1)
+  // 6. Initialize VL53L4CX Distance Sensor (I2C1)
   p_vl53->I2cHandle = &hi2c1;
   p_vl53->I2cDevAddr = 0x52; // 8-bit I2C Address
 
@@ -174,7 +180,7 @@ int main(void)
   }
 
   printf("===============================================\r\n");
-  printf(" Starting Telemetry Stream & Display Loop... \r\n");
+  printf(" System Ready! Press PB14 to Toggle Laser      \r\n");
   printf("===============================================\r\n\r\n");
   /* USER CODE END 2 */
 
@@ -183,6 +189,8 @@ int main(void)
   VL53LX_MultiRangingData_t ranging_data;
   uint8_t vl53_ready = 0;
   uint32_t sample_count = 0;
+  static uint32_t last_btn_tick = 0;
+  static uint8_t last_btn_state = GPIO_PIN_SET;
 
   while (1)
   {
@@ -191,10 +199,22 @@ int main(void)
     /* USER CODE BEGIN 3 */
     sample_count++;
 
-    // --- 1. Read SCL3300 Data ---
+    // --- 1. Push Button (PB14) Toggle Logic for CAT4002A Laser EN (PA4) ---
+    uint8_t btn_state = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14);
+    if (last_btn_state == GPIO_PIN_SET && btn_state == GPIO_PIN_RESET) {
+        if (HAL_GetTick() - last_btn_tick > 150) { // 150ms Debounce
+            laser_active = !laser_active;
+            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, laser_active ? GPIO_PIN_SET : GPIO_PIN_RESET);
+            last_btn_tick = HAL_GetTick();
+            printf("\r\n>>> [PB14 BUTTON] Laser Toggled: %s <<<\r\n\r\n", laser_active ? "ON" : "OFF");
+        }
+    }
+    last_btn_state = btn_state;
+
+    // --- 2. Read SCL3300 Data ---
     bool scl_valid = SCL3300_ReadData(&scl_dev);
 
-    // --- 2. Read VL53L4CX Data ---
+    // --- 3. Read VL53L4CX Data ---
     int distance_mm = -1;
     uint8_t num_objects = 0;
     if (vl53_status == VL53LX_ERROR_NONE) {
@@ -209,7 +229,7 @@ int main(void)
         }
     }
 
-    // --- 3. Update 1.3" OLED Display (I2C2) ---
+    // --- 4. Update 1.3" OLED Display (I2C2) ---
     if (oled_ok) {
         OLED_Clear(&oled_dev);
 
@@ -230,23 +250,24 @@ int main(void)
         OLED_Printf(&oled_dev, 2, 37, 1, "X:%5.1f  Y:%5.1f", scl_dev.angle_x_deg, scl_dev.angle_y_deg);
         OLED_Printf(&oled_dev, 2, 47, 1, "Z:%5.1f  T:%4.1fC", scl_dev.angle_z_deg, scl_dev.temp_c);
 
-        // Status Footer
+        // Status Footer with Laser State Indicator
         OLED_DrawLine(&oled_dev, 0, 56, 128, 56, OLED_COLOR_WHITE);
-        OLED_Printf(&oled_dev, 2, 57, 1, "SCL:%s | ToF:%s",
-                    scl_valid ? "OK" : "ERR",
-                    (vl53_status == 0 && distance_mm >= 0) ? "OK" : "WAIT");
+        OLED_Printf(&oled_dev, 2, 57, 1, "LSR:%s | SCL:%s",
+                    laser_active ? "ON " : "OFF",
+                    scl_valid ? "OK" : "ERR");
 
         OLED_UpdateScreen(&oled_dev);
     }
 
-    // --- 4. Output Telemetry via USB CDC ---
-    printf("#%05lu | [SCL3300] RS: %u (%s) | AngX: %6.2f deg, AngY: %6.2f deg, AngZ: %6.2f deg, Temp: %.1f C | [VL53L4CX] Dist: %d mm (Objs: %d)\r\n",
+    // --- 5. Output Telemetry via USB CDC ---
+    printf("#%05lu | [LASER: %s] | [SCL3300] RS: %u (%s) | AngX: %6.2f deg, AngY: %6.2f deg, AngZ: %6.2f deg, Temp: %.1f C | [VL53L4CX] Dist: %d mm\r\n",
            (unsigned long)sample_count,
+           laser_active ? "ON " : "OFF",
            scl_dev.last_rs, scl_valid ? "OK" : (scl_dev.crc_error ? "CRC_ERR" : "STATUS_ERR"),
            scl_dev.angle_x_deg, scl_dev.angle_y_deg, scl_dev.angle_z_deg, scl_dev.temp_c,
-           distance_mm, num_objects);
+           distance_mm);
 
-    HAL_Delay(200); // UI Refresh rate ~5 Hz
+    HAL_Delay(150); // Refresh rate ~6.5 Hz
   }
   /* USER CODE END 3 */
 }
@@ -561,13 +582,21 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3 | GPIO_PIN_4, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3 | GPIO_PIN_4, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : PA3 PA4 */
-  GPIO_InitStruct.Pin = GPIO_PIN_3 | GPIO_PIN_4;
+  /*Configure GPIO pin : PA3 (SCL3300 CS Pin - Output High) */
+  GPIO_InitStruct.Pin = GPIO_PIN_3;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_SET);
+
+  /*Configure GPIO pin : PA4 (CAT4002A EN/DIM Laser Driver Control) */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -577,6 +606,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB14 (Laser Toggle Push Button with Internal Pull-Up) */
+  GPIO_InitStruct.Pin = GPIO_PIN_14;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PC10 */
