@@ -2,7 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
+  * @brief          : Main program body - Digi-Tape Tool Dual Sensor Demo
   ******************************************************************************
   * @attention
   *
@@ -24,6 +24,8 @@
 /* USER CODE BEGIN Includes */
 #include "usbd_cdc_if.h"
 #include <stdio.h>
+#include "scl3300.h"
+#include "vl53lx_api.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,7 +54,9 @@ SPI_HandleTypeDef hspi1;
 UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
-
+SCL3300_HandleTypeDef scl_dev;
+VL53LX_Dev_t          vl53_dev;
+VL53LX_DEV            p_vl53 = &vl53_dev;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -64,8 +68,7 @@ static void MX_I2C2_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
-void Scan_I2C_Bus(I2C_HandleTypeDef *hi2c, const char* bus_name);
-uint32_t SCL3300_Read_Register(uint32_t cmd);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -117,37 +120,86 @@ int main(void)
   HAL_Delay(100);                                        // Boot delay for ToF internal MCU initialization
 
   // 2. Allow USB CDC port to enumerate on PC terminal
-  HAL_Delay(2500);
+  HAL_Delay(2000);
+
+  printf("\r\n===============================================\r\n");
+  printf("  STM32G491 DIGITAL MEASUREMENT DEVICE DEMO    \r\n");
+  printf("===============================================\r\n");
+
+  // 3. Initialize SCL3300 Inclinometer (SPI1)
+  printf("[INIT] Initializing SCL3300 SPI1 (CS: PA3)...\r\n");
+  bool scl_ok = SCL3300_Init(&scl_dev, &hspi1, GPIOA, GPIO_PIN_3, 4);
+  if (scl_ok) {
+      printf(" -> [OK] SCL3300 Initialized (WHOAMI: 0x%02X)\r\n", scl_dev.whoami);
+  } else {
+      printf(" -> [WARN] SCL3300 Init Warning (WHOAMI: 0x%02X)\r\n", scl_dev.whoami);
+  }
+
+  // 4. Initialize VL53L4CX Distance Sensor (I2C1)
+  p_vl53->I2cHandle = &hi2c1;
+  p_vl53->I2cDevAddr = 0x52; // 8-bit I2C Address
+
+  printf("[INIT] Initializing VL53L4CX I2C1 (SCL: PA15, SDA: PB7)...\r\n");
+  int vl53_status = VL53LX_WaitDeviceBooted(p_vl53);
+  if (vl53_status == VL53LX_ERROR_NONE) {
+      vl53_status = VL53LX_DataInit(p_vl53);
+      if (vl53_status == VL53LX_ERROR_NONE) {
+          vl53_status = VL53LX_StartMeasurement(p_vl53);
+          if (vl53_status == VL53LX_ERROR_NONE) {
+              printf(" -> [OK] VL53L4CX Measurement Started\r\n");
+          } else {
+              printf(" -> [ERROR] VL53LX_StartMeasurement failed: %d\r\n", vl53_status);
+          }
+      } else {
+          printf(" -> [ERROR] VL53LX_DataInit failed: %d\r\n", vl53_status);
+      }
+  } else {
+      printf(" -> [ERROR] VL53LX_WaitDeviceBooted failed: %d\r\n", vl53_status);
+  }
+
+  printf("===============================================\r\n");
+  printf(" Starting Live Streaming Sensor Telemetry... \r\n");
+  printf("===============================================\r\n\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  VL53LX_MultiRangingData_t ranging_data;
+  uint8_t vl53_ready = 0;
+  uint32_t sample_count = 0;
+
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    printf("\r\n=================================\r\n");
-    printf("  STM32G491 CUSTOM PCB DIAGNOSTICS  \r\n");
-    printf("=================================\r\n");
+    sample_count++;
 
-    // Scan I2C1 (PB7/PA15) for VL53L4CX (Expect 0x29)
-    Scan_I2C_Bus(&hi2c1, "I2C1 (PB7/PA15)");
+    // --- 1. Read SCL3300 Data ---
+    SCL3300_ReadData(&scl_dev);
 
-    // Query SCL3300 WHOAMI (32-bit Command Frame: 0x40000091)
-    printf("--- Testing SCL3300 SPI1 (CS: PA3) ---\r\n");
+    // --- 2. Read VL53L4CX Data ---
+    int distance_mm = -1;
+    uint8_t num_objects = 0;
+    if (vl53_status == VL53LX_ERROR_NONE) {
+        if (VL53LX_GetMeasurementDataReady(p_vl53, &vl53_ready) == VL53LX_ERROR_NONE && vl53_ready != 0) {
+            if (VL53LX_GetMultiRangingData(p_vl53, &ranging_data) == VL53LX_ERROR_NONE) {
+                num_objects = ranging_data.NumberOfObjectsFound;
+                if (num_objects > 0) {
+                    distance_mm = ranging_data.RangeData[0].RangeMilliMeter;
+                }
+                VL53LX_ClearInterruptAndStartMeasurement(p_vl53);
+            }
+        }
+    }
 
-    // First transfer sends the WHOAMI read command
-    SCL3300_Read_Register(0x40000091);
-    HAL_Delay(1);
+    // --- 3. Output Telemetry via USB CDC ---
+    printf("#%05lu | [SCL3300] AngX: %6.2f deg, AngY: %6.2f deg, AngZ: %6.2f deg, Temp: %.1f C | [VL53L4CX] Dist: %d mm (Objs: %d)\r\n",
+           (unsigned long)sample_count,
+           scl_dev.angle_x_deg, scl_dev.angle_y_deg, scl_dev.angle_z_deg, scl_dev.temp_c,
+           distance_mm, num_objects);
 
-    // Second transfer retrieves the response payload requested in frame 1
-    uint32_t response = SCL3300_Read_Register(0x40000091);
-
-    printf(" -> SCL3300 Response Frame: 0x%08lX\r\n", (unsigned long)response);
-    printf("=================================\r\n");
-
-    HAL_Delay(3000); // Repeat scan every 3 seconds
+    HAL_Delay(250); // Stream sample rate ~4 Hz
   }
   /* USER CODE END 3 */
 }
@@ -494,70 +546,16 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* Enable Internal Pull-ups on I2C2 pins (PB7: SDA, PA15: SCL) */
-  GPIO_InitStruct.Pin = GPIO_PIN_7;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.Alternate = GPIO_AF4_I2C2;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  GPIO_InitStruct.Pin = GPIO_PIN_15;
-  GPIO_InitStruct.Alternate = GPIO_AF4_I2C2;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
 
-// 1. Redirect standard printf to USB CDC Transmit
+// Redirect standard printf to USB CDC Transmit
 int _write(int file, char *ptr, int len)
 {
     CDC_Transmit_FS((uint8_t*)ptr, len);
     return len;
-}
-
-// 2. Scan an I2C bus for active devices
-void Scan_I2C_Bus(I2C_HandleTypeDef *hi2c, const char* bus_name)
-{
-    printf("Scanning %s...\r\n", bus_name);
-    uint8_t devices_found = 0;
-
-    for (uint16_t i = 1; i < 128; i++)
-    {
-        if (HAL_I2C_IsDeviceReady(hi2c, (uint16_t)(i << 1), 2, 10) == HAL_OK)
-        {
-            printf(" -> [FOUND] Device at 7-bit Addr: 0x%02X (8-bit: 0x%02X)\r\n", i, (i << 1));
-            devices_found++;
-        }
-    }
-
-    if (devices_found == 0)
-    {
-        printf(" -> [WARN] No devices found on %s.\r\n", bus_name);
-    }
-    printf("--- %s Scan Complete (%d found) ---\r\n\n", bus_name, devices_found);
-}
-
-// 3. Read Murata SCL3300 32-bit command register frame
-uint32_t SCL3300_Read_Register(uint32_t cmd)
-{
-    uint8_t tx_buf[4];
-    uint8_t rx_buf[4] = {0};
-
-    // Format 32-bit MSB-first command
-    tx_buf[0] = (uint8_t)((cmd >> 24) & 0xFF);
-    tx_buf[1] = (uint8_t)((cmd >> 16) & 0xFF);
-    tx_buf[2] = (uint8_t)((cmd >> 8)  & 0xFF);
-    tx_buf[3] = (uint8_t)(cmd & 0xFF);
-
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET); // Drive PA3 Low (CS)
-    HAL_SPI_TransmitReceive(&hspi1, tx_buf, rx_buf, 4, 100);
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_SET);   // Drive PA3 High (CS)
-
-    // Construct 32-bit response frame
-    return ((uint32_t)rx_buf[0] << 24) | ((uint32_t)rx_buf[1] << 16) |
-           ((uint32_t)rx_buf[2] << 8)  | (uint32_t)rx_buf[3];
 }
 
 /* USER CODE END 4 */
@@ -569,7 +567,6 @@ uint32_t SCL3300_Read_Register(uint32_t cmd)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
@@ -588,8 +585,6 @@ void Error_Handler(void)
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
