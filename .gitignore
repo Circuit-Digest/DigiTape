@@ -1,0 +1,28 @@
+# STM32CubeIDE / Eclipse Build Artifacts
+Debug/
+Release/
+build/
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+*.d
+*.su
+*.list
+
+# IDE / User-specific Settings
+.settings/
+*.launch
+
+# Temporary and Log files
+*.bak
+*.log
+*.tmp
+*.TMP
+
+# OS Generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
