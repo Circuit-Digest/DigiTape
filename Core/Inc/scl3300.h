@@ -39,6 +39,11 @@ typedef struct {
     uint16_t           status_sum;
     uint8_t            whoami;
 
+    // Return Status & Health Flags
+    uint8_t            last_rs;     // Bits [29:28] of response: 1 = Normal OK, 0 = Startup, 3 = Fault
+    bool               crc_error;   // True if any CRC check failed
+    bool               status_error;// True if RS != 1 (Normal)
+
     // Converted physical values
     float              acc_x_g;
     float              acc_y_g;

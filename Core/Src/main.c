@@ -175,8 +175,8 @@ int main(void)
     /* USER CODE BEGIN 3 */
     sample_count++;
 
-    // --- 1. Read SCL3300 Data ---
-    SCL3300_ReadData(&scl_dev);
+    // --- 1. Read SCL3300 Data & Check Return Status (RS) / CRC ---
+    bool scl_valid = SCL3300_ReadData(&scl_dev);
 
     // --- 2. Read VL53L4CX Data ---
     int distance_mm = -1;
@@ -194,8 +194,9 @@ int main(void)
     }
 
     // --- 3. Output Telemetry via USB CDC ---
-    printf("#%05lu | [SCL3300] AngX: %6.2f deg, AngY: %6.2f deg, AngZ: %6.2f deg, Temp: %.1f C | [VL53L4CX] Dist: %d mm (Objs: %d)\r\n",
+    printf("#%05lu | [SCL3300] RS: %u (%s) | AngX: %6.2f deg, AngY: %6.2f deg, AngZ: %6.2f deg, Temp: %.1f C | [VL53L4CX] Dist: %d mm (Objs: %d)\r\n",
            (unsigned long)sample_count,
+           scl_dev.last_rs, scl_valid ? "OK" : (scl_dev.crc_error ? "CRC_ERR" : "STATUS_ERR"),
            scl_dev.angle_x_deg, scl_dev.angle_y_deg, scl_dev.angle_z_deg, scl_dev.temp_c,
            distance_mm, num_objects);
 
