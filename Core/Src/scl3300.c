@@ -149,20 +149,36 @@ bool SCL3300_ReadData(SCL3300_HandleTypeDef *dev)
     uint32_t f7 = SCL3300_Transfer32(dev, SCL3300_CMD_READ_WHOAMI);
     if (SCL3300_ProcessFrame(dev, f7, &val)) dev->raw_ang_z = val; else ok = false;
 
-    // Convert raw values to physical units
-    float acc_div = 12000.0f;
-    if (dev->mode == 1) acc_div = 6000.0f;
-    else if (dev->mode == 2) acc_div = 3000.0f;
+    // Convert raw values to physical units if frame sequence was valid
+    if (ok) {
+        float acc_div = 12000.0f;
+        if (dev->mode == 1) acc_div = 6000.0f;
+        else if (dev->mode == 2) acc_div = 3000.0f;
 
-    dev->acc_x_g = (float)dev->raw_acc_x / acc_div;
-    dev->acc_y_g = (float)dev->raw_acc_y / acc_div;
-    dev->acc_z_g = (float)dev->raw_acc_z / acc_div;
+        dev->acc_x_g = (float)dev->raw_acc_x / acc_div;
+        dev->acc_y_g = (float)dev->raw_acc_y / acc_div;
+        dev->acc_z_g = (float)dev->raw_acc_z / acc_div;
 
-    dev->angle_x_deg = ((float)dev->raw_ang_x / 16384.0f) * 90.0f;
-    dev->angle_y_deg = ((float)dev->raw_ang_y / 16384.0f) * 90.0f;
-    dev->angle_z_deg = ((float)dev->raw_ang_z / 16384.0f) * 90.0f;
+        dev->angle_x_deg = ((float)dev->raw_ang_x / 16384.0f) * 90.0f;
+        dev->angle_y_deg = ((float)dev->raw_ang_y / 16384.0f) * 90.0f;
+        dev->angle_z_deg = ((float)dev->raw_ang_z / 16384.0f) * 90.0f;
 
-    dev->temp_c = -273.0f + ((float)dev->raw_temp / 18.9f);
+        dev->temp_c = -273.0f + ((float)dev->raw_temp / 18.9f);
+    } else if (dev->status_error || dev->last_rs == 3) {
+        // --- Auto-Recovery for SCL3300 Latched Status Error (RS = 3) ---
+        // Reading Status Summary twice clears the latched status error flags (e.g. from rapid movement/bump)
+        SCL3300_Transfer32(dev, SCL3300_CMD_SWITCH_BANK0);
+        SCL3300_Transfer32(dev, SCL3300_CMD_READ_STATUS);
+        SCL3300_Transfer32(dev, SCL3300_CMD_READ_STATUS);
+
+        // Verify if status cleared
+        uint32_t test_frame = SCL3300_Transfer32(dev, SCL3300_CMD_READ_WHOAMI);
+        uint8_t test_rs = (uint8_t)((test_frame >> 24) & 0x03);
+        if (test_rs != 0x01) {
+            // Re-initialize sensor if error condition persists
+            SCL3300_Init(dev, dev->hspi, dev->cs_port, dev->cs_pin, dev->mode);
+        }
+    }
 
     return ok;
 }
