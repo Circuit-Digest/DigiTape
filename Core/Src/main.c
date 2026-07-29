@@ -2,7 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body - Digi-Tape Tool Complete Telemetry
+  * @brief          : Main program body - Digi-Tape Tool Full System Telemetry
   ******************************************************************************
   * @attention
   *
@@ -73,7 +73,8 @@ static void MX_I2C2_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+float   Read_Battery_Voltage(void);
+uint8_t Calculate_Battery_Percentage(float v_bat);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -121,20 +122,23 @@ int main(void)
   // 1. Initial State: Keep CAT4002A EN (PA4) LOW (Laser OFF)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
 
-  // 2. Hardware Reset & Boot Pulse for VL53L4CX via PC11 (XSHUT)
+  // 2. Calibrate ADC3 for accurate battery voltage readings on PB1
+  HAL_ADCEx_Calibration_Start(&hadc3, ADC_SINGLE_ENDED);
+
+  // 3. Hardware Reset & Boot Pulse for VL53L4CX via PC11 (XSHUT)
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET); // Hold XSHUT low
   HAL_Delay(50);                                         // Hold reset low
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET);   // Drive XSHUT high
   HAL_Delay(100);                                        // Boot delay for ToF internal MCU initialization
 
-  // 3. Allow USB CDC port to enumerate on PC terminal
+  // 4. Allow USB CDC port to enumerate on PC terminal
   HAL_Delay(1500);
 
   printf("\r\n===============================================\r\n");
   printf("  STM32G491 DIGI-TAPE TOOL FULL SYSTEM DEMO    \r\n");
   printf("===============================================\r\n");
 
-  // 4. Initialize OLED Display (I2C2 on PA8/PA9)
+  // 5. Initialize OLED Display (I2C2 on PA8/PA9)
   printf("[INIT] Initializing 1.3\" OLED Display on I2C2 (PA8/PA9)...\r\n");
   bool oled_ok = OLED_Init(&oled_dev, &hi2c2);
   if (oled_ok) {
@@ -148,7 +152,7 @@ int main(void)
       printf(" -> [WARN] OLED Display Not Detected on I2C2\r\n");
   }
 
-  // 5. Initialize SCL3300 Inclinometer (SPI1)
+  // 6. Initialize SCL3300 Inclinometer (SPI1)
   printf("[INIT] Initializing SCL3300 SPI1 (CS: PA3)...\r\n");
   bool scl_ok = SCL3300_Init(&scl_dev, &hspi1, GPIOA, GPIO_PIN_3, 4);
   if (scl_ok) {
@@ -157,7 +161,7 @@ int main(void)
       printf(" -> [WARN] SCL3300 Init Warning (WHOAMI: 0x%02X)\r\n", scl_dev.whoami);
   }
 
-  // 6. Initialize VL53L4CX Distance Sensor (I2C1)
+  // 7. Initialize VL53L4CX Distance Sensor (I2C1)
   p_vl53->I2cHandle = &hi2c1;
   p_vl53->I2cDevAddr = 0x52; // 8-bit I2C Address
 
@@ -180,7 +184,7 @@ int main(void)
   }
 
   printf("===============================================\r\n");
-  printf(" System Ready! Press PB14 to Toggle Laser      \r\n");
+  printf(" System Ready! Streaming Telemetry & Battery... \r\n");
   printf("===============================================\r\n\r\n");
   /* USER CODE END 2 */
 
@@ -211,10 +215,14 @@ int main(void)
     }
     last_btn_state = btn_state;
 
-    // --- 2. Read SCL3300 Data ---
+    // --- 2. Read 1S Li-Ion Battery Voltage & Percentage via ADC3 (PB1) ---
+    float v_bat = Read_Battery_Voltage();
+    uint8_t bat_pct = Calculate_Battery_Percentage(v_bat);
+
+    // --- 3. Read SCL3300 Inclinometer Data ---
     bool scl_valid = SCL3300_ReadData(&scl_dev);
 
-    // --- 3. Read VL53L4CX Data ---
+    // --- 4. Read VL53L4CX Distance Sensor Data ---
     int distance_mm = -1;
     uint8_t num_objects = 0;
     if (vl53_status == VL53LX_ERROR_NONE) {
@@ -229,20 +237,24 @@ int main(void)
         }
     }
 
-    // --- 4. Update 1.3" OLED Display (I2C2) ---
+    float distance_cm = (distance_mm >= 0) ? (distance_mm / 10.0f) : -1.0f;
+
+    // --- 5. Update 1.3" OLED Display (I2C2) ---
     if (oled_ok) {
         OLED_Clear(&oled_dev);
 
-        // Header Title Bar
+        // Header Title Bar with Battery Status
         OLED_FillRect(&oled_dev, 0, 0, 128, 11, OLED_COLOR_WHITE);
-        OLED_DrawStringSmall(&oled_dev, 22, 2, "DIGI-TAPE TOOL", OLED_COLOR_BLACK);
+        OLED_DrawStringSmall(&oled_dev, 2, 2, "DIGI-TAPE", OLED_COLOR_BLACK);
+        char bat_str[16];
+        snprintf(bat_str, sizeof(bat_str), "%3d%% %.2fV", bat_pct, v_bat);
+        OLED_DrawStringSmall(&oled_dev, 62, 2, bat_str, OLED_COLOR_BLACK);
 
-        // Primary Distance Measurement (Large text)
+        // Primary Distance Measurement in Centimeters (Clean, bold, non-overlapping)
         if (distance_mm >= 0) {
-            OLED_Printf(&oled_dev, 4, 15, 2, "%4d mm", distance_mm);
-            OLED_Printf(&oled_dev, 88, 20, 1, "(%.1f)", distance_mm / 10.0f);
+            OLED_Printf(&oled_dev, 4, 15, 2, "%5.1f CM", distance_cm);
         } else {
-            OLED_Printf(&oled_dev, 4, 15, 2, " --- mm");
+            OLED_Printf(&oled_dev, 4, 15, 2, " --- CM");
         }
 
         // Inclinometer Angles & Temp
@@ -259,13 +271,14 @@ int main(void)
         OLED_UpdateScreen(&oled_dev);
     }
 
-    // --- 5. Output Telemetry via USB CDC ---
-    printf("#%05lu | [LASER: %s] | [SCL3300] RS: %u (%s) | AngX: %6.2f deg, AngY: %6.2f deg, AngZ: %6.2f deg, Temp: %.1f C | [VL53L4CX] Dist: %d mm\r\n",
+    // --- 6. Output Telemetry via USB CDC ---
+    printf("#%05lu | [BAT: %.2fV (%3d%%)] | [LASER: %s] | [SCL3300] RS: %u (%s) | AngX: %6.2f deg, AngY: %6.2f deg, AngZ: %6.2f deg, Temp: %.1f C | [VL53L4CX] Dist: %5.1f cm (%d mm)\r\n",
            (unsigned long)sample_count,
+           v_bat, bat_pct,
            laser_active ? "ON " : "OFF",
            scl_dev.last_rs, scl_valid ? "OK" : (scl_dev.crc_error ? "CRC_ERR" : "STATUS_ERR"),
            scl_dev.angle_x_deg, scl_dev.angle_y_deg, scl_dev.angle_z_deg, scl_dev.temp_c,
-           distance_mm);
+           distance_cm, distance_mm);
 
     HAL_Delay(150); // Refresh rate ~6.5 Hz
   }
@@ -362,11 +375,11 @@ static void MX_ADC3_Init(void)
     Error_Handler();
   }
 
-  /** Configure Regular Channel
+  /** Configure Regular Channel - Set 640.5 cycles for 50k source impedance
   */
   sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
@@ -632,6 +645,37 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+// Read 1S battery voltage via ADC3 Channel 1 (PB1) with 16-sample averaging
+float Read_Battery_Voltage(void)
+{
+    uint32_t adc_sum = 0;
+    const uint8_t samples = 16;
+
+    for (uint8_t i = 0; i < samples; i++) {
+        HAL_ADC_Start(&hadc3);
+        if (HAL_ADC_PollForConversion(&hadc3, 10) == HAL_OK) {
+            adc_sum += HAL_ADC_GetValue(&hadc3);
+        }
+        HAL_ADC_Stop(&hadc3);
+    }
+
+    float raw_avg = (float)adc_sum / (float)samples;
+
+    // 12-bit ADC (0..4095) with 3.30V VREF
+    // Voltage at PB1 = (raw_avg / 4095.0) * 3.30V
+    // 1:1 Resistor Divider (100k / 100k) -> V_BAT = V_ADC * 2.0
+    float v_adc = (raw_avg / 4095.0f) * 3.30f;
+    return v_adc * 2.0f;
+}
+
+// Convert 1S Li-Ion / LiPo battery voltage to percentage (4.20V = 100%, 3.30V = 0%)
+uint8_t Calculate_Battery_Percentage(float v_bat)
+{
+    if (v_bat >= 4.20f) return 100;
+    if (v_bat <= 3.30f) return 0;
+    return (uint8_t)(((v_bat - 3.30f) / (4.20f - 3.30f)) * 100.0f);
+}
 
 // Redirect standard printf to USB CDC Transmit
 int _write(int file, char *ptr, int len)
