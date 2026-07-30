@@ -92,10 +92,13 @@ uint8_t  settings_item = 0;       // 0: Unit, 1: Datum, 2: Rear Offset
 
 uint8_t  unit_mode = 0;           // 0: CM, 1: MM, 2: M, 3: INCH
 uint8_t  datum_mode = 0;          // 0: REAR (bottom), 1: FRONT (top)
-float    rear_offset_cm = 8.5f;   // 8.5 cm device body length offset when REAR datum selected
+float    rear_offset_cm = 5.5f;   // 5.5 cm device body length offset when REAR datum selected
 
 bool     laser_active = false;
 uint32_t last_short_press_tick = 0; // For global double-press detection
+
+float    laser_pitch_elev = 0.0f;   // Global Laser Pitch Elevation (-Angle X)
+float    side_roll = 0.0f;          // Global Screen Side Roll (Angle Y)
 
 bool     hold_active = false;
 int      hold_distance_mm = -1;
@@ -248,6 +251,17 @@ float Calculate_Net_Distance_CM(int raw_mm)
 {
     if (raw_mm < 0) return -1.0f;
     float dist_cm = (float)raw_mm / 10.0f;
+
+    // Apply ToF Oblique Angle Reflectance & FoV Elongation Correction Factor C(theta)
+    // C(theta) = 1.0 - 0.160 * sin^2(theta)
+    // Corrects ToF distance stretching at steep tilt angles (e.g. 85.5cm raw -> 75.5cm true at 59 deg tilt)
+    float rad = DEG_TO_RAD(fabsf(laser_pitch_elev));
+    float sin_val = sinf(rad);
+    float corr_factor = 1.0f - 0.160f * (sin_val * sin_val);
+    if (corr_factor < 0.70f) corr_factor = 0.70f;
+
+    dist_cm *= corr_factor;
+
     if (datum_mode == 0) { // REAR Datum (+rear_offset_cm)
         dist_cm += rear_offset_cm;
     }
@@ -642,8 +656,8 @@ int main(void)
         bool scl_valid = SCL3300_ReadData(&scl_dev);
 
         // Laser Elevation Pitch Angle: ToF laser points along -X axis -> Elev = -Angle X
-        float laser_pitch_elev = -scl_dev.angle_x_deg;
-        float side_roll        =  scl_dev.angle_y_deg;
+        laser_pitch_elev = -scl_dev.angle_x_deg;
+        side_roll        =  scl_dev.angle_y_deg;
 
         // --- 5. Update 1.3\" OLED Display ---
         if (oled_ok) {
@@ -750,8 +764,19 @@ int main(void)
                         OLED_DrawLevelBars(&oled_dev, laser_pitch_elev, side_roll);
                         Format_Distance_String(active_net_cm, unit_mode, prim_str, sizeof(prim_str));
                     } else if (active_mode == 2) {
+                        // HEIGHT Mode (Pythagoras indirect height measurement with 1.8cm ToF vertical mounting offset compensation)
                         float rad = DEG_TO_RAD(laser_pitch_elev);
-                        float indirect_height_cm = (active_net_cm >= 0) ? (active_net_cm * sinf(rad)) : 0.0f;
+                        float indirect_height_cm = 0.0f;
+                        if (active_net_cm >= 0.0f) {
+                            float raw_h = active_net_cm * sinf(rad);
+                            if (datum_mode == 0) { // REAR Datum (device base resting on reference surface)
+                                // Subtract ToF 1.5cm vertical mounting offset to align height with device base
+                                indirect_height_cm = raw_h - 1.5f * cosf(rad);
+                                if (indirect_height_cm < 0.0f) indirect_height_cm = 0.0f;
+                            } else { // FRONT Datum
+                                indirect_height_cm = (raw_h >= 0.0f) ? raw_h : 0.0f;
+                            }
+                        }
                         char hyp_str[16];
                         Format_Distance_String(active_net_cm, unit_mode, hyp_str, sizeof(hyp_str));
                         Format_Distance_String(indirect_height_cm, unit_mode, prim_str, sizeof(prim_str));
