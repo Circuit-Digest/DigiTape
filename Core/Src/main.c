@@ -41,16 +41,24 @@ typedef struct {
     uint8_t  prev_b;
     uint8_t  prev_sw;
     uint32_t press_start_tick;
+    uint32_t last_turn_tick;
     bool     short_press;
     bool     long_press;
     bool     long_press_handled;
 } Encoder_t;
+
+typedef enum {
+    APP_STATE_MENU = 0,
+    APP_STATE_MEASURE,
+    APP_STATE_SETTINGS
+} AppState_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define DEG_TO_RAD(deg) ((deg) * 0.017453292519943295f)
 #define M_PI_F 3.14159265358979323846f
+#define DOUBLE_PRESS_WINDOW_MS 400
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -69,80 +77,68 @@ SPI_HandleTypeDef hspi1;
 UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
-SCL3300_HandleTypeDef scl_dev;
-VL53LX_Dev_t          vl53_dev;
-VL53LX_DEV            p_vl53 = &vl53_dev;
-OLED_HandleTypeDef    oled_dev;
+OLED_HandleTypeDef       oled_dev;
+SCL3300_HandleTypeDef    scl_dev;
+VL53LX_Dev_t             vl53_dev_inst;
+VL53LX_DEV               vl53_dev = &vl53_dev_inst;
+VL53LX_DEV               p_vl53 = &vl53_dev_inst;
 
-bool                  laser_active = false;
 Encoder_t             encoder = {0};
 
-// System Settings & History
-uint8_t               unit_mode = 0;      // 0: CM, 1: MM, 2: M, 3: IN
-uint8_t               datum_mode = 0;     // 0: REAR (+10.0cm), 1: FRONT (0.0cm)
-float                 rear_offset_cm = 10.0f;
-bool                  in_settings = false;
-uint8_t               settings_item = 0;  // 0: Unit, 1: Datum, 2: Rear Offset
+uint8_t  selected_mode = 0;       // Highlighted item in 4x2 Menu Grid (0..7)
+AppState_t app_state = APP_STATE_MENU; // Global app state
+bool     in_settings = false;     // Full-screen Settings overlay active
+uint8_t  settings_item = 0;       // 0: Unit, 1: Datum, 2: Rear Offset
 
-bool                  hold_active = false;
-int                   hold_distance_mm = -1;
+uint8_t  unit_mode = 0;           // 0: CM, 1: MM, 2: M, 3: INCH
+uint8_t  datum_mode = 0;          // 0: REAR (bottom), 1: FRONT (top)
+float    rear_offset_cm = 8.5f;   // 8.5 cm device body length offset when REAR datum selected
 
-// Multi-shot Measurement States (Area, Volume, Cylinder)
-uint8_t               multi_shot_step = 0;
-float                 shot1_cm = -1.0f;
-float                 shot2_cm = -1.0f;
-float                 shot3_cm = -1.0f;
+bool     laser_active = false;
+uint32_t last_short_press_tick = 0; // For global double-press detection
 
-// Continuous MAX/MIN Ranging Tracking
-float                 min_dist_cm = 9999.0f;
-float                 max_dist_cm = 0.0f;
+bool     hold_active = false;
+int      hold_distance_mm = -1;
 
-// History Memory Log
-float                 history_buffer[10] = {0};
-uint8_t               history_count = 0;
-uint8_t               history_view_idx = 0;
+float    min_dist_cm = 9999.0f;
+float    max_dist_cm = 0.0f;
 
-// App State Machine
-typedef enum {
-    APP_STATE_MENU = 0,
-    APP_STATE_MEASURE,
-    APP_STATE_SETTINGS
-} AppState_t;
+bool     boot_complete = false;
+uint32_t blink_tick = 0;
+bool     blink_on = true;
 
-AppState_t            app_state = APP_STATE_MENU;
-uint8_t               selected_mode = 0; // 0:DIST, 1:LEVEL, 2:HEIGHT, 3:AREA, 4:VOL, 5:CYL, 6:MAXMIN, 7:MEM
+// Multi-shot measurement accumulators for area, volume, height, cylinder
+uint8_t  multi_shot_step = 0;
+float    shot1_cm = -1.0f;
+float    shot2_cm = -1.0f;
+float    shot3_cm = -1.0f;
 
-// Double-Press Detection
-uint32_t              last_short_press_tick = 0;
-#define               DOUBLE_PRESS_WINDOW_MS 400
+// Saved History Storage (last 10 measurements)
+#define MAX_HISTORY 10
+float    history_val[MAX_HISTORY];
+float    history_buffer[MAX_HISTORY];
+uint8_t  history_mode[MAX_HISTORY];
+uint8_t  history_unit[MAX_HISTORY];
+uint8_t  history_count = 0;
+uint8_t  history_view_idx = 0;
 
-// Boot Animation
-bool                  boot_complete = false;
-
-// Blink Timer for Multi-Shot Icons
-uint32_t              blink_tick = 0;
-bool                  blink_on = true;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_ADC3_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_ADC3_Init(void);
 /* USER CODE BEGIN PFP */
-float   Read_Battery_Voltage(void);
+float Read_Battery_Voltage(void);
 uint8_t Calculate_Battery_Percentage(float v_bat);
-void    Encoder_Init(Encoder_t *e);
-void    Encoder_Update(Encoder_t *e);
-float   Calculate_Net_Distance_CM(int raw_mm);
-void    Format_Distance_String(float dist_cm, uint8_t unit, char *out_str, size_t max_len);
-void    Format_Area_String(float area_cm2, uint8_t unit, char *out_str, size_t max_len);
-void    Format_Volume_String(float vol_cm3, uint8_t unit, char *out_str, size_t max_len);
-void    Add_To_History(float dist_cm);
-void    Reset_Multi_Shot(void);
+static uint8_t Read_Battery_Percentage(void);
+static float Convert_Distance_Unit(float dist_cm, uint8_t unit);
+static void Format_Distance_String(float dist_cm, uint8_t unit, char *out_buf, size_t buf_len);
+static void Save_History(float val_cm, uint8_t mode, uint8_t unit);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -154,6 +150,7 @@ void Encoder_Init(Encoder_t *e)
     e->prev_b = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13);
     e->prev_sw = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14);
     e->press_start_tick = 0;
+    e->last_turn_tick = 0;
     e->short_press = false;
     e->long_press = false;
     e->long_press_handled = false;
@@ -169,13 +166,25 @@ void Reset_Multi_Shot(void)
 
 void Encoder_Update(Encoder_t *e)
 {
-    // 1. Read Quadrature Encoder Pins (A = PB12, B = PB13)
+    // 1. Read Quadrature / Spring-Return Encoder Pins (Hongyan RS11: A = PB12, B = PB13)
     uint8_t curr_a = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12);
     uint8_t curr_b = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13);
 
-    // Detect falling edge transition on Channel A (PB12)
-    if (e->prev_a == GPIO_PIN_SET && curr_a == GPIO_PIN_RESET) {
-        int dir = (curr_b == GPIO_PIN_SET) ? 1 : -1;
+    uint32_t now = HAL_GetTick();
+    int dir = 0;
+
+    // Dual-edge detection with 150ms spring-return lockout for Hongyan RS11 (+15 deg CW / -15 deg CCW toggle switch)
+    if (now - e->last_turn_tick >= 150) {
+        if (e->prev_a == GPIO_PIN_SET && curr_a == GPIO_PIN_RESET) {
+            dir = (curr_b == GPIO_PIN_SET) ? 1 : -1;
+            e->last_turn_tick = now;
+        } else if (e->prev_b == GPIO_PIN_SET && curr_b == GPIO_PIN_RESET) {
+            dir = (curr_a == GPIO_PIN_SET) ? -1 : 1;
+            e->last_turn_tick = now;
+        }
+    }
+
+    if (dir != 0) {
         e->counter += dir;
 
         if (app_state == APP_STATE_SETTINGS || in_settings) {
@@ -200,9 +209,10 @@ void Encoder_Update(Encoder_t *e)
             }
         }
 
-        printf("\r\n>>> [ENCODER TURN] Counter: %ld | State: %d | Mode: %u | Settings Item: %u <<<\r\n\r\n",
-               (long)e->counter, (int)app_state, selected_mode, settings_item);
+        printf("\r\n>>> [ENCODER BUMP] Dir: %d | Counter: %ld | Mode: %u | Settings Item: %u <<<\r\n\r\n",
+               dir, (long)e->counter, selected_mode, settings_item);
     }
+
     e->prev_a = curr_a;
     e->prev_b = curr_b;
 
@@ -247,25 +257,25 @@ float Calculate_Net_Distance_CM(int raw_mm)
 void Format_Distance_String(float dist_cm, uint8_t unit, char *out_str, size_t max_len)
 {
     if (dist_cm < 0) {
-        snprintf(out_str, max_len, " ---");
+        snprintf(out_str, max_len, "---");
         return;
     }
 
     switch (unit) {
         case 0: // CM
-            snprintf(out_str, max_len, "%5.1f CM", dist_cm);
+            snprintf(out_str, max_len, "%.1f CM", dist_cm);
             break;
         case 1: // MM
-            snprintf(out_str, max_len, "%5.0f MM", dist_cm * 10.0f);
+            snprintf(out_str, max_len, "%.0f MM", dist_cm * 10.0f);
             break;
         case 2: // M
-            snprintf(out_str, max_len, "%5.3f M ", dist_cm / 100.0f);
+            snprintf(out_str, max_len, "%.3f M", dist_cm / 100.0f);
             break;
         case 3: // INCH
-            snprintf(out_str, max_len, "%5.1f IN", dist_cm / 2.54f);
+            snprintf(out_str, max_len, "%.1f IN", dist_cm / 2.54f);
             break;
         default:
-            snprintf(out_str, max_len, "%5.1f CM", dist_cm);
+            snprintf(out_str, max_len, "%.1f CM", dist_cm);
             break;
     }
 }
@@ -409,10 +419,10 @@ int main(void)
       }
       // Phase 2: Brand reveal
       OLED_Clear(&oled_dev);
-      OLED_DrawString3x(&oled_dev, 10, 2, "DIGI", OLED_COLOR_WHITE);
-      OLED_DrawString3x(&oled_dev, 14, 24, "TAPE", OLED_COLOR_WHITE);
-      OLED_DrawStringSmall(&oled_dev, 28, 48, "PRO METER V2.0", OLED_COLOR_WHITE);
-      OLED_DrawLine(&oled_dev, 10, 57, 118, 57, OLED_COLOR_WHITE);
+      OLED_DrawString3x(&oled_dev, 14, 2, "DIGI", OLED_COLOR_WHITE);
+      OLED_DrawString3x(&oled_dev, 20, 34, "TAPE", OLED_COLOR_WHITE);
+    //   OLED_DrawStringSmall(&oled_dev, 28, 48, "PRO METER V2.0", OLED_COLOR_WHITE);
+    //   OLED_DrawLine(&oled_dev, 10, 57, 118, 57, OLED_COLOR_WHITE);
       OLED_UpdateScreen(&oled_dev);
       HAL_Delay(2000);
       boot_complete = true;
@@ -643,10 +653,10 @@ int main(void)
                 // --- FEATURE PHONE MAIN MENU SCREEN (ALL 8 MODES IN SINGLE MENU GRID) ---
                 OLED_FillRect(&oled_dev, 0, 0, 128, 12, OLED_COLOR_WHITE);
                 OLED_DrawStringSmall(&oled_dev, 2, 2, "SELECT MODE", OLED_COLOR_BLACK);
-                OLED_DrawBatteryIcon(&oled_dev, 94, 2, bat_pct, OLED_COLOR_BLACK);
+                OLED_DrawBatteryIcon(&oled_dev, 110, 2, bat_pct, OLED_COLOR_BLACK);
                 char bat_txt[6];
                 snprintf(bat_txt, sizeof(bat_txt), "%d%%", bat_pct);
-                OLED_DrawStringSmall(&oled_dev, 112, 2, bat_txt, OLED_COLOR_BLACK);
+                OLED_DrawStringSmall(&oled_dev, 86, 2, bat_txt, OLED_COLOR_BLACK);
 
                 // 4x2 Mode Grid (Y: 15..48) with graphical icons
                 for (uint8_t i = 0; i < 8; i++) {
@@ -723,10 +733,10 @@ int main(void)
                     const char *mode_names[8] = {"DIST", "LEVEL", "HEIGHT", "AREA", "VOLUME", "CYL", "MAXMIN", "MEMORY"};
                     OLED_DrawStringSmall(&oled_dev, 2, 2, mode_names[active_mode], OLED_COLOR_BLACK);
 
-                    OLED_DrawBatteryIcon(&oled_dev, 94, 2, bat_pct, OLED_COLOR_BLACK);
+                    OLED_DrawBatteryIcon(&oled_dev, 110, 2, bat_pct, OLED_COLOR_BLACK);
                     char bat_txt[6];
                     snprintf(bat_txt, sizeof(bat_txt), "%d%%", bat_pct);
-                    OLED_DrawStringSmall(&oled_dev, 112, 2, bat_txt, OLED_COLOR_BLACK);
+                    OLED_DrawStringSmall(&oled_dev, 86, 2, bat_txt, OLED_COLOR_BLACK);
                     OLED_DrawDatumIcon(&oled_dev, 50, 1, (datum_mode == 0), OLED_COLOR_BLACK);
                     OLED_DrawLaserIcon(&oled_dev, 62, 2, laser_active, OLED_COLOR_BLACK);
                     OLED_DrawLine(&oled_dev, 0, 12, 127, 12, OLED_COLOR_WHITE);
@@ -736,11 +746,9 @@ int main(void)
                     char sec2[32] = {0};
 
                     if (active_mode == 0) {
-                        snprintf(sec1, sizeof(sec1), "Elev: %5.1f deg", laser_pitch_elev);
-                        snprintf(sec2, sizeof(sec2), "Roll: %5.1f deg", side_roll);
+                        // Draw visual horizontal (side roll) & vertical (pitch elevation) leveling bars
+                        OLED_DrawLevelBars(&oled_dev, laser_pitch_elev, side_roll);
                         Format_Distance_String(active_net_cm, unit_mode, prim_str, sizeof(prim_str));
-                        OLED_DrawStringSmall(&oled_dev, 2, 14, sec1, OLED_COLOR_WHITE);
-                        OLED_DrawStringSmall(&oled_dev, 2, 24, sec2, OLED_COLOR_WHITE);
                     } else if (active_mode == 2) {
                         float rad = DEG_TO_RAD(laser_pitch_elev);
                         float indirect_height_cm = (active_net_cm >= 0) ? (active_net_cm * sinf(rad)) : 0.0f;
@@ -851,12 +859,35 @@ int main(void)
                         OLED_DrawStringSmall(&oled_dev, 2, 14, sec1, OLED_COLOR_WHITE);
                     }
 
-                    OLED_DrawLine(&oled_dev, 0, 34, 127, 34, OLED_COLOR_WHITE);
-                    // Primary reading zone: use 2x Large font (12px/char) for reliable fit
-                    // Right-align the primary string: 128 - (strlen * 12) - 2
-                    uint8_t prim_len = strlen(prim_str);
-                    uint8_t prim_x = (prim_len * 12 < 126) ? (126 - prim_len * 12) : 2;
-                    OLED_DrawStringLarge(&oled_dev, prim_x, 40, prim_str, OLED_COLOR_WHITE);
+                    if (active_mode != 0) {
+                        OLED_DrawLine(&oled_dev, 0, 34, 127, 34, OLED_COLOR_WHITE);
+                    }
+                    // Primary reading zone: Maximized 7-segment digits (30px height, 4px thick) with compact unit badge
+                    if (active_mode == 0) {
+                        uint16_t str_w = 0;
+                        const char *p = prim_str;
+                        while (*p) {
+                            if ((*p >= '0' && *p <= '9') || *p == '-') str_w += 18;
+                            else if (*p == '.') str_w += 7;
+                            else if (*p == ' ') str_w += 4;
+                            else { str_w += strlen(p) * 6; break; }
+                            p++;
+                        }
+                        uint8_t prim_x = (str_w < 118) ? ((118 - str_w) / 2 + 1) : 1;
+                        OLED_Draw7SegmentString(&oled_dev, prim_x, 26, prim_str, 15, 30, 3, OLED_COLOR_WHITE);
+                    } else {
+                        uint16_t str_w = 0;
+                        const char *p = prim_str;
+                        while (*p) {
+                            if ((*p >= '0' && *p <= '9') || *p == '-') str_w += 16;
+                            else if (*p == '.') str_w += 6;
+                            else if (*p == ' ') str_w += 4;
+                            else { str_w += strlen(p) * 6; break; }
+                            p++;
+                        }
+                        uint8_t prim_x = (str_w < 124) ? (126 - str_w) : 1;
+                        OLED_Draw7SegmentString(&oled_dev, prim_x, 38, prim_str, 13, 22, 3, OLED_COLOR_WHITE);
+                    }
                 }
             }
 

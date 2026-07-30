@@ -46,5 +46,8 @@ void OLED_DrawTriangleIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y);
 void OLED_DrawCylinderIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t active_edge, bool blink_on);
 void OLED_DrawFullScreenBubble(OLED_HandleTypeDef *dev, float pitch_deg, float roll_deg, float angle_z, float temp_c);
 void OLED_DrawMenuModeIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t mode_idx, uint8_t color);
+void OLED_DrawLevelBars(OLED_HandleTypeDef *dev, float pitch_elev_deg, float roll_deg);
+void OLED_Draw7SegmentDigit(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, char c, uint8_t w, uint8_t h, uint8_t t, uint8_t color);
+void OLED_Draw7SegmentString(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, const char *str, uint8_t w, uint8_t h, uint8_t t, uint8_t color);
 
 #endif /* OLED_H */

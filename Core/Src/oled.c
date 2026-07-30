@@ -581,56 +581,64 @@ void OLED_DrawCylinderIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_
 
 void OLED_DrawFullScreenBubble(OLED_HandleTypeDef *dev, float pitch_deg, float roll_deg, float angle_z, float temp_c)
 {
-    uint8_t cx = 64;
+    // 1. Render Top Horizontal & Right Vertical Leveling Bars
+    // OLED_DrawLevelBars(dev, pitch_deg, roll_deg);
+
+    // 2. Left Side Telemetry Readout Column (X: 2..46) with 7-Segment Digits
+    char buf[16];
+
+    // Row 0 (Y: 6): Pitch Elevation (-Angle X)
+    snprintf(buf, sizeof(buf), "%.1f", pitch_deg);
+    OLED_DrawStringSmall(dev, 2, 6, "E:", OLED_COLOR_WHITE);
+    OLED_Draw7SegmentString(dev, 14, 6, buf, 6, 10, 1, OLED_COLOR_WHITE);
+
+    // Row 1 (Y: 20): Side Roll (Angle Y)
+    snprintf(buf, sizeof(buf), "%.1f", roll_deg);
+    OLED_DrawStringSmall(dev, 2, 20, "R:", OLED_COLOR_WHITE);
+    OLED_Draw7SegmentString(dev, 14, 20, buf, 6, 10, 1, OLED_COLOR_WHITE);
+
+    // Row 2 (Y: 34): Z Angle
+    snprintf(buf, sizeof(buf), "%.1f", angle_z);
+    OLED_DrawStringSmall(dev, 2, 34, "Z:", OLED_COLOR_WHITE);
+    OLED_Draw7SegmentString(dev, 14, 34, buf, 6, 10, 1, OLED_COLOR_WHITE);
+
+    // Row 3 (Y: 48): Temperature
+    snprintf(buf, sizeof(buf), "%.1f", temp_c);
+    OLED_DrawStringSmall(dev, 2, 48, "T:", OLED_COLOR_WHITE);
+    OLED_Draw7SegmentString(dev, 14, 48, buf, 6, 10, 1, OLED_COLOR_WHITE);
+
+    // 3. Right Side Maximized 2D Bubble Target Graph (Center: 83, 32 | Radius: 25px)
+    uint8_t cx = 83;
     uint8_t cy = 32;
     uint8_t r = 25;
 
     // Crosshairs
-    OLED_DrawLine(dev, 0, cy, 127, cy, OLED_COLOR_WHITE);
-    OLED_DrawLine(dev, cx, 0, cx, 63, OLED_COLOR_WHITE);
+    // OLED_DrawLine(dev, 52, cy, 114, cy, OLED_COLOR_WHITE);
+    // OLED_DrawLine(dev, cx, 6, cx, 58, OLED_COLOR_WHITE);
 
     // Target rings
     OLED_DrawCircle(dev, cx, cy, r, OLED_COLOR_WHITE);
-    OLED_DrawCircle(dev, cx, cy, 3, OLED_COLOR_WHITE);
+    OLED_DrawCircle(dev, cx, cy, 4, OLED_COLOR_WHITE);
 
     // Moving bubble dot
-    float dx = (pitch_deg / 15.0f) * (r - 2);
-    float dy = (roll_deg  / 15.0f) * (r - 2);
+    float dx = (pitch_deg / 15.0f) * (r - 3);
+    float dy = (roll_deg / 15.0f) * (r - 3);
 
     int bx = cx + (int)dx;
     int by = cy + (int)dy;
 
     // Clamp inside circle boundary
-    if (bx < cx - r + 2) bx = cx - r + 2;
-    if (bx > cx + r - 2) bx = cx + r - 2;
-    if (by < cy - r + 2) by = cy - r + 2;
-    if (by > cy + r - 2) by = cy + r - 2;
+    if (bx < cx - r + 3) bx = cx - r + 3;
+    if (bx > cx + r - 3) bx = cx + r - 3;
+    if (by < cy - r + 3) by = cy - r + 3;
+    if (by > cy + r - 3) by = cy + r - 3;
 
     bool is_level = (fabsf(pitch_deg) < 0.5f && fabsf(roll_deg) < 0.5f);
     if (is_level) {
-        OLED_FillCircle(dev, bx, by, 4, OLED_COLOR_WHITE); 
+        OLED_FillCircle(dev, bx, by, 5, OLED_COLOR_WHITE); 
     } else {
         OLED_DrawCircle(dev, bx, by, 3, OLED_COLOR_WHITE); 
     }
-
-    // 4-corner readouts
-    char buf[16];
-    
-    // Top-left: Pitch
-    snprintf(buf, sizeof(buf), "E:%.1f", pitch_deg);
-    OLED_DrawStringSmall(dev, 0, 0, buf, OLED_COLOR_WHITE);
-    
-    // Top-right: Roll
-    snprintf(buf, sizeof(buf), "R:%.1f", roll_deg);
-    OLED_DrawStringSmall(dev, 86, 0, buf, OLED_COLOR_WHITE);
-    
-    // Bottom-left: Z angle
-    snprintf(buf, sizeof(buf), "Z:%.1f", angle_z);
-    OLED_DrawStringSmall(dev, 0, 56, buf, OLED_COLOR_WHITE);
-
-    // Bottom-right: Temp
-    snprintf(buf, sizeof(buf), "T:%.1f", temp_c);
-    OLED_DrawStringSmall(dev, 86, 56, buf, OLED_COLOR_WHITE);
 }
 
 void OLED_DrawMenuModeIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t mode_idx, uint8_t color)
@@ -688,5 +696,164 @@ void OLED_DrawMenuModeIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_
 
         default:
             break;
+    }
+}
+
+void OLED_DrawLevelBars(OLED_HandleTypeDef *dev, float pitch_elev_deg, float roll_deg)
+{
+    // 1. Top Horizontal Bar for Laser Pitch Elevation (-Angle X)
+    // Position: X: 8..104 (Width 97px), Y: 16..20 (Height 5px)
+    uint8_t h_x = 8;
+    uint8_t h_y = 16;
+    uint8_t h_w = 97;
+    uint8_t h_h = 5;
+    uint8_t h_center = h_x + h_w / 2; // X: 56
+
+    OLED_DrawRect(dev, h_x, h_y, h_w, h_h, OLED_COLOR_WHITE);
+    OLED_DrawLine(dev, h_center, h_y, h_center, h_y + h_h - 1, OLED_COLOR_WHITE);
+
+    // Laser Pitch Elevation (-15° to +15° range mapped to +/-42px)
+    float pitch_offset = (pitch_elev_deg / 15.0f) * 42.0f;
+    if (pitch_offset < -42.0f) pitch_offset = -42.0f;
+    if (pitch_offset > 42.0f)  pitch_offset = 42.0f;
+    int h_marker = h_center + (int)pitch_offset;
+
+    bool pitch_level = (fabsf(pitch_elev_deg) < 0.5f);
+    if (pitch_level) {
+        OLED_FillRect(dev, h_marker - 2, h_y + 1, 5, 3, OLED_COLOR_WHITE);
+    } else {
+        OLED_DrawRect(dev, h_marker - 2, h_y + 1, 5, 3, OLED_COLOR_WHITE);
+    }
+
+    // 2. Right Vertical Bar for Side Roll Tilt (Angle Y)
+    // Position: X: 120..124 (Width 5px), Y: 16..58 (Height 43px)
+    uint8_t v_x = 120;
+    uint8_t v_y = 16;
+    uint8_t v_w = 5;
+    uint8_t v_h = 43;
+    uint8_t v_center = v_y + v_h / 2; // Y: 37
+
+    OLED_DrawRect(dev, v_x, v_y, v_w, v_h, OLED_COLOR_WHITE);
+    OLED_DrawLine(dev, v_x, v_center, v_x + v_w - 1, v_center, OLED_COLOR_WHITE);
+
+    // Side Roll Tilt (top edge up = positive = marker moves UP towards Y:16)
+    float roll_offset = (-roll_deg / 15.0f) * 18.0f;
+    if (roll_offset < -18.0f) roll_offset = -18.0f;
+    if (roll_offset > 18.0f)  roll_offset = 18.0f;
+    int v_marker = v_center + (int)roll_offset;
+
+    bool roll_level = (fabsf(roll_deg) < 0.5f);
+    if (roll_level) {
+        OLED_FillRect(dev, v_x + 1, v_marker - 2, 3, 5, OLED_COLOR_WHITE);
+    } else {
+        OLED_DrawRect(dev, v_x + 1, v_marker - 2, 3, 5, OLED_COLOR_WHITE);
+    }
+}
+
+static void OLED_DrawSegHex(OLED_HandleTypeDef *dev, uint8_t seg, uint8_t x, uint8_t y, uint8_t segWd, uint8_t segHt, uint8_t segThick, bool is_on)
+{
+    if (!is_on) return; // Clean 100% noise-free unlit segments!
+
+    uint8_t ofs = segThick / 2;
+
+    switch (seg) {
+        case 0: // top
+        case 3: // bottom
+        case 6: // middle
+            for (uint8_t i = 0; i <= ofs; i++) {
+                OLED_DrawLine(dev, x + i, y + ofs - i, x + segWd - 1 - i, y + ofs - i, OLED_COLOR_WHITE);
+                OLED_DrawLine(dev, x + i, y + ofs + i, x + segWd - 1 - i, y + ofs + i, OLED_COLOR_WHITE);
+            }
+            break;
+
+        case 1: // right-top
+        case 2: // right-bottom
+        case 4: // left-bottom
+        case 5: // left-top
+            for (uint8_t i = 0; i <= ofs; i++) {
+                OLED_DrawLine(dev, x + ofs - i, y + i, x + ofs - i, y + segHt - 1 - i, OLED_COLOR_WHITE);
+                OLED_DrawLine(dev, x + ofs + i, y + i, x + ofs + i, y + segHt - 1 - i, OLED_COLOR_WHITE);
+            }
+            break;
+    }
+}
+
+void OLED_Draw7SegmentDigit(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, char c, uint8_t w, uint8_t h, uint8_t t, uint8_t color)
+{
+    if (c == '.') {
+        OLED_FillRect(dev, x + 1, y + h - t - 1, t, t, color);
+        return;
+    }
+    if (c == ' ') return;
+
+    uint8_t mask = 0x00;
+    if (c >= '0' && c <= '9') {
+        static const uint8_t masks[10] = {
+            0x3F, // '0'
+            0x06, // '1'
+            0x5B, // '2'
+            0x4F, // '3'
+            0x66, // '4'
+            0x6D, // '5'
+            0x7D, // '6'
+            0x07, // '7'
+            0x7F, // '8'
+            0x6F  // '9'
+        };
+        mask = masks[c - '0'];
+    } else if (c == '-') {
+        mask = 0x40; // 'g' segment
+    }
+
+    if (mask == 0x00) return;
+
+    uint8_t ofs = 1 + t / 2;
+    uint8_t segWd = (w > ofs * 2 + 2) ? (w - ofs * 2) : 4;
+    uint8_t segHt = (h > ofs * 2 + 3) ? ((h - ofs * 2 - 3) / 2) : 6;
+
+    // Segment 0: Top (a)
+    OLED_DrawSegHex(dev, 0, x + ofs, y, segWd, segHt, t, (mask & 0x01) != 0);
+
+    // Segment 1: Right-Top (b)
+    OLED_DrawSegHex(dev, 1, x + w - t, y + ofs, segWd, segHt, t, (mask & 0x02) != 0);
+
+    // Segment 2: Right-Bottom (c)
+    OLED_DrawSegHex(dev, 2, x + w - t, y + ofs + segHt + 1, segWd, segHt, t, (mask & 0x04) != 0);
+
+    // Segment 3: Bottom (d)
+    OLED_DrawSegHex(dev, 3, x + ofs, y + segHt + segHt + 2, segWd, segHt, t, (mask & 0x08) != 0);
+
+    // Segment 4: Left-Bottom (e)
+    OLED_DrawSegHex(dev, 4, x, y + ofs + segHt + 1, segWd, segHt, t, (mask & 0x10) != 0);
+
+    // Segment 5: Left-Top (f)
+    OLED_DrawSegHex(dev, 5, x, y + ofs, segWd, segHt, t, (mask & 0x20) != 0);
+
+    // Segment 6: Middle (g)
+    OLED_DrawSegHex(dev, 6, x + ofs, y + segHt + 1, segWd, segHt, t, (mask & 0x40) != 0);
+}
+
+void OLED_Draw7SegmentString(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, const char *str, uint8_t w, uint8_t h, uint8_t t, uint8_t color)
+{
+    while (*str) {
+        char c = *str;
+        if (c >= '0' && c <= '9') {
+            OLED_Draw7SegmentDigit(dev, x, y, c, w, h, t, color);
+            x += w + 3;
+        } else if (c == '-') {
+            OLED_Draw7SegmentDigit(dev, x, y, '-', w, h, t, color);
+            x += w + 3;
+        } else if (c == ' ') {
+            x += 4; // Compact 4px spacing between digits and unit badge
+        } else if (c == '.') {
+            OLED_Draw7SegmentDigit(dev, x, y, '.', w, h, t, color);
+            x += t + 3;
+        } else {
+            // Unit badge (e.g. CM, MM, M, IN, cm2): baseline-aligned small font
+            uint8_t unit_y = (h > 10) ? (y + h - 8) : y;
+            OLED_DrawStringSmall(dev, x, unit_y, str, color);
+            break;
+        }
+        str++;
     }
 }
