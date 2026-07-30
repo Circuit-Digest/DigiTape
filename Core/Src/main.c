@@ -2,7 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body - Digi-Tape Tool Full System Telemetry
+  * @brief          : Main program body - Commercial Grade Digital Measurement Device
   ******************************************************************************
   * @attention
   *
@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "usbd_cdc_if.h"
 #include <stdio.h>
+#include <math.h>
 #include "scl3300.h"
 #include "vl53lx_api.h"
 #include "oled.h"
@@ -32,12 +33,22 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+typedef struct {
+    int32_t  counter;
+    uint8_t  prev_a;
+    uint8_t  prev_b;
+    uint8_t  prev_sw;
+    uint32_t press_start_tick;
+    bool     short_press;
+    bool     long_press;
+    bool     long_press_handled;
+    uint8_t  mode; // 0: DIST, 1: LEVEL, 2: HEIGHT, 3: MEMORY
+} Encoder_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define DEG_TO_RAD(deg) ((deg) * 0.017453292519943295f)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -62,6 +73,21 @@ VL53LX_DEV            p_vl53 = &vl53_dev;
 OLED_HandleTypeDef    oled_dev;
 
 bool                  laser_active = false;
+Encoder_t             encoder = {0};
+
+// System Settings & History
+uint8_t               unit_mode = 0;      // 0: CM, 1: MM, 2: M, 3: IN
+uint8_t               datum_mode = 0;     // 0: REAR (+10.0cm), 1: FRONT (0.0cm)
+float                 rear_offset_cm = 10.0f;
+bool                  in_settings = false;
+uint8_t               settings_item = 0;  // 0: Unit, 1: Datum, 2: Rear Offset
+
+bool                  hold_active = false;
+int                   hold_distance_mm = -1;
+
+float                 history_buffer[10] = {0};
+uint8_t               history_count = 0;
+uint8_t               history_view_idx = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -75,11 +101,142 @@ static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
 float   Read_Battery_Voltage(void);
 uint8_t Calculate_Battery_Percentage(float v_bat);
+void    Encoder_Init(Encoder_t *e);
+void    Encoder_Update(Encoder_t *e);
+float   Calculate_Net_Distance_CM(int raw_mm);
+void    Format_Distance_String(float dist_cm, uint8_t unit, char *out_str, size_t max_len);
+void    Add_To_History(float dist_cm);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void Encoder_Init(Encoder_t *e)
+{
+    e->counter = 0;
+    e->prev_a = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12);
+    e->prev_b = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13);
+    e->prev_sw = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14);
+    e->press_start_tick = 0;
+    e->short_press = false;
+    e->long_press = false;
+    e->long_press_handled = false;
+    e->mode = 0;
+}
 
+void Encoder_Update(Encoder_t *e)
+{
+    // 1. Read Quadrature Encoder Pins (A = PB12, B = PB13)
+    uint8_t curr_a = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12);
+    uint8_t curr_b = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13);
+
+    // Detect falling edge transition on Channel A (PB12)
+    if (e->prev_a == GPIO_PIN_SET && curr_a == GPIO_PIN_RESET) {
+        int dir = (curr_b == GPIO_PIN_SET) ? 1 : -1;
+        e->counter += dir;
+
+        if (in_settings) {
+            // Scroll through 3 Settings Items (0: Unit, 1: Datum, 2: Rear Offset)
+            int item = (int)settings_item + dir;
+            if (item < 0) item = 2;
+            if (item > 2) item = 0;
+            settings_item = (uint8_t)item;
+        } else {
+            // ALWAYS update e->mode from e->counter to prevent mode lock-up
+            int m = e->counter % 4;
+            if (m < 0) m += 4;
+            e->mode = (uint8_t)m;
+
+            if (e->mode == 3 && history_count > 0) {
+                // In History Mode, scroll through history records
+                int h_idx = (int)history_view_idx + dir;
+                if (h_idx < 0) h_idx = history_count - 1;
+                if (h_idx >= history_count) h_idx = 0;
+                history_view_idx = (uint8_t)h_idx;
+            }
+        }
+
+        printf("\r\n>>> [ENCODER TURN] Counter: %ld | Mode: %u | Settings: %s (Item: %u) <<<\r\n\r\n",
+               (long)e->counter, e->mode, in_settings ? "YES" : "NO", settings_item);
+    }
+    e->prev_a = curr_a;
+    e->prev_b = curr_b;
+
+    // 2. Read Switch Pin (SW = PB14) with Short-Press & Long-Press Detection
+    uint8_t curr_sw = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14);
+
+    // Button Pressed Down
+    if (e->prev_sw == GPIO_PIN_SET && curr_sw == GPIO_PIN_RESET) {
+        e->press_start_tick = HAL_GetTick();
+        e->long_press_handled = false;
+    }
+
+    // Button Held Down (Check for Long Press > 800ms)
+    if (curr_sw == GPIO_PIN_RESET && !e->long_press_handled) {
+        if (HAL_GetTick() - e->press_start_tick >= 800) {
+            e->long_press = true;
+            e->long_press_handled = true;
+        }
+    }
+
+    // Button Released
+    if (e->prev_sw == GPIO_PIN_RESET && curr_sw == GPIO_PIN_SET) {
+        uint32_t press_duration = HAL_GetTick() - e->press_start_tick;
+        if (press_duration >= 50 && press_duration < 800 && !e->long_press_handled) {
+            e->short_press = true;
+        }
+    }
+
+    e->prev_sw = curr_sw;
+}
+
+float Calculate_Net_Distance_CM(int raw_mm)
+{
+    if (raw_mm < 0) return -1.0f;
+    float dist_cm = (float)raw_mm / 10.0f;
+    if (datum_mode == 0) { // REAR Datum (+rear_offset_cm)
+        dist_cm += rear_offset_cm;
+    }
+    return dist_cm;
+}
+
+void Format_Distance_String(float dist_cm, uint8_t unit, char *out_str, size_t max_len)
+{
+    if (dist_cm < 0) {
+        snprintf(out_str, max_len, " ---");
+        return;
+    }
+
+    switch (unit) {
+        case 0: // CM
+            snprintf(out_str, max_len, "%5.1f CM", dist_cm);
+            break;
+        case 1: // MM
+            snprintf(out_str, max_len, "%5.0f MM", dist_cm * 10.0f);
+            break;
+        case 2: // M
+            snprintf(out_str, max_len, "%5.3f M ", dist_cm / 100.0f);
+            break;
+        case 3: // INCH
+            snprintf(out_str, max_len, "%5.1f IN", dist_cm / 2.54f);
+            break;
+        default:
+            snprintf(out_str, max_len, "%5.1f CM", dist_cm);
+            break;
+    }
+}
+
+void Add_To_History(float dist_cm)
+{
+    if (dist_cm < 0) return;
+
+    // Shift history entries right
+    for (int i = 9; i > 0; i--) {
+        history_buffer[i] = history_buffer[i - 1];
+    }
+    history_buffer[0] = dist_cm;
+    if (history_count < 10) history_count++;
+    history_view_idx = 0;
+}
 /* USER CODE END 0 */
 
 /**
@@ -125,34 +282,37 @@ int main(void)
   // 2. Calibrate ADC3 for accurate battery voltage readings on PB1
   HAL_ADCEx_Calibration_Start(&hadc3, ADC_SINGLE_ENDED);
 
-  // 3. Hardware Reset & Boot Pulse for VL53L4CX via PC11 (XSHUT)
+  // 3. Initialize Rotary Encoder (SW: PB14, A: PB12, B: PB13)
+  Encoder_Init(&encoder);
+
+  // 4. Hardware Reset & Boot Pulse for VL53L4CX via PC11 (XSHUT)
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET); // Hold XSHUT low
   HAL_Delay(50);                                         // Hold reset low
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET);   // Drive XSHUT high
   HAL_Delay(100);                                        // Boot delay for ToF internal MCU initialization
 
-  // 4. Allow USB CDC port to enumerate on PC terminal
+  // 5. Allow USB CDC port to enumerate on PC terminal
   HAL_Delay(1500);
 
   printf("\r\n===============================================\r\n");
-  printf("  STM32G491 DIGI-TAPE TOOL FULL SYSTEM DEMO    \r\n");
+  printf("  STM32G491 PROFESSIONAL MEASURE METER DEMO   \r\n");
   printf("===============================================\r\n");
 
-  // 5. Initialize OLED Display (I2C2 on PA8/PA9)
+  // 6. Initialize OLED Display (I2C2 on PA8/PA9)
   printf("[INIT] Initializing 1.3\" OLED Display on I2C2 (PA8/PA9)...\r\n");
   bool oled_ok = OLED_Init(&oled_dev, &hi2c2);
   if (oled_ok) {
       printf(" -> [OK] 1.3\" OLED Display Initialized (Addr: 0x3C)\r\n");
       OLED_Clear(&oled_dev);
       OLED_Printf(&oled_dev, 12, 10, 2, "DIGI-TAPE");
-      OLED_Printf(&oled_dev, 30, 32, 1, "TOOL V1.0");
+      OLED_Printf(&oled_dev, 30, 32, 1, "PRO METER V1.0");
       OLED_Printf(&oled_dev, 8, 48, 1, "Initializing...");
       OLED_UpdateScreen(&oled_dev);
   } else {
       printf(" -> [WARN] OLED Display Not Detected on I2C2\r\n");
   }
 
-  // 6. Initialize SCL3300 Inclinometer (SPI1)
+  // 7. Initialize SCL3300 Inclinometer (SPI1)
   printf("[INIT] Initializing SCL3300 SPI1 (CS: PA3)...\r\n");
   bool scl_ok = SCL3300_Init(&scl_dev, &hspi1, GPIOA, GPIO_PIN_3, 4);
   if (scl_ok) {
@@ -161,7 +321,7 @@ int main(void)
       printf(" -> [WARN] SCL3300 Init Warning (WHOAMI: 0x%02X)\r\n", scl_dev.whoami);
   }
 
-  // 7. Initialize VL53L4CX Distance Sensor (I2C1)
+  // 8. Initialize VL53L4CX Distance Sensor (I2C1)
   p_vl53->I2cHandle = &hi2c1;
   p_vl53->I2cDevAddr = 0x52; // 8-bit I2C Address
 
@@ -184,7 +344,7 @@ int main(void)
   }
 
   printf("===============================================\r\n");
-  printf(" System Ready! Streaming Telemetry & Battery... \r\n");
+  printf(" System Ready! Rotate Encoder / Press Button... \r\n");
   printf("===============================================\r\n\r\n");
   /* USER CODE END 2 */
 
@@ -193,94 +353,207 @@ int main(void)
   VL53LX_MultiRangingData_t ranging_data;
   uint8_t vl53_ready = 0;
   uint32_t sample_count = 0;
-  static uint32_t last_btn_tick = 0;
-  static uint8_t last_btn_state = GPIO_PIN_SET;
+  uint32_t last_ui_tick = HAL_GetTick();
 
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    sample_count++;
+    // --- 1. Continuous Non-Blocking Polling of Rotary Encoder (SW: PB14, A: PB12, B: PB13) ---
+    Encoder_Update(&encoder);
 
-    // --- 1. Push Button (PB14) Toggle Logic for CAT4002A Laser EN (PA4) ---
-    uint8_t btn_state = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14);
-    if (last_btn_state == GPIO_PIN_SET && btn_state == GPIO_PIN_RESET) {
-        if (HAL_GetTick() - last_btn_tick > 150) { // 150ms Debounce
-            laser_active = !laser_active;
-            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, laser_active ? GPIO_PIN_SET : GPIO_PIN_RESET);
-            last_btn_tick = HAL_GetTick();
-            printf("\r\n>>> [PB14 BUTTON] Laser Toggled: %s <<<\r\n\r\n", laser_active ? "ON" : "OFF");
+    // --- 2. Non-Blocking 33 Hz UI & Telemetry Timer (30 ms) ---
+    if (HAL_GetTick() - last_ui_tick >= 30) {
+        last_ui_tick = HAL_GetTick();
+        sample_count++;
+
+        // --- Handle Long Press (> 800ms): Enter / Exit Settings Menu ---
+        if (encoder.long_press) {
+            encoder.long_press = false;
+            in_settings = !in_settings;
+            printf("\r\n>>> [LONG PRESS] Settings Menu %s <<<\r\n\r\n", in_settings ? "ENTERED" : "EXITED");
         }
-    }
-    last_btn_state = btn_state;
 
-    // --- 2. Read 1S Li-Ion Battery Voltage & Percentage via ADC3 (PB1) ---
-    float v_bat = Read_Battery_Voltage();
-    uint8_t bat_pct = Calculate_Battery_Percentage(v_bat);
+        // --- Handle Short Press (< 500ms): Hold / Save or Toggle Settings ---
+        if (encoder.short_press) {
+            encoder.short_press = false;
 
-    // --- 3. Read SCL3300 Inclinometer Data ---
-    bool scl_valid = SCL3300_ReadData(&scl_dev);
-
-    // --- 4. Read VL53L4CX Distance Sensor Data ---
-    int distance_mm = -1;
-    uint8_t num_objects = 0;
-    if (vl53_status == VL53LX_ERROR_NONE) {
-        if (VL53LX_GetMeasurementDataReady(p_vl53, &vl53_ready) == VL53LX_ERROR_NONE && vl53_ready != 0) {
-            if (VL53LX_GetMultiRangingData(p_vl53, &ranging_data) == VL53LX_ERROR_NONE) {
-                num_objects = ranging_data.NumberOfObjectsFound;
-                if (num_objects > 0) {
-                    distance_mm = ranging_data.RangeData[0].RangeMilliMeter;
+            if (in_settings) {
+                // Toggle Settings Values
+                if (settings_item == 0) { // Unit
+                    unit_mode = (unit_mode + 1) % 4;
+                } else if (settings_item == 1) { // Datum
+                    datum_mode = (datum_mode + 1) % 2;
+                } else if (settings_item == 2) { // Rear Offset Adjust
+                    rear_offset_cm += 1.0f;
+                    if (rear_offset_cm > 20.0f) rear_offset_cm = 0.0f;
                 }
-                VL53LX_ClearInterruptAndStartMeasurement(p_vl53);
+                printf("\r\n>>> [SETTINGS TOGGLE] Unit: %u | Datum: %u | Offset: %.1fcm <<<\r\n\r\n",
+                       unit_mode, datum_mode, rear_offset_cm);
+            } else {
+                // Hold/Freeze Measurement & Toggle Laser
+                hold_active = !hold_active;
+                laser_active = !hold_active; // Turn laser on during live ranging, off when held
+                HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, laser_active ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+                if (hold_active) {
+                    float net_cm = Calculate_Net_Distance_CM(hold_distance_mm);
+                    Add_To_History(net_cm);
+                    printf("\r\n>>> [HOLD & SAVE] Measurement Frozen: %.1f CM | Saved to History #01 <<<\r\n\r\n", net_cm);
+                } else {
+                    printf("\r\n>>> [UNHOLD] Resumed Live Ranging <<<\r\n\r\n");
+                }
             }
         }
-    }
 
-    float distance_cm = (distance_mm >= 0) ? (distance_mm / 10.0f) : -1.0f;
+        // --- 3. Read 1S Li-Ion Battery Voltage & Percentage via ADC3 (PB1) ---
+        float v_bat = Read_Battery_Voltage();
+        uint8_t bat_pct = Calculate_Battery_Percentage(v_bat);
 
-    // --- 5. Update 1.3" OLED Display (I2C2) ---
-    if (oled_ok) {
-        OLED_Clear(&oled_dev);
+        // --- 4. Read SCL3300 Inclinometer Data ---
+        bool scl_valid = SCL3300_ReadData(&scl_dev);
 
-        // Header Title Bar with Battery Status
-        OLED_FillRect(&oled_dev, 0, 0, 128, 11, OLED_COLOR_WHITE);
-        OLED_DrawStringSmall(&oled_dev, 2, 2, "DIGI-TAPE", OLED_COLOR_BLACK);
-        char bat_str[16];
-        snprintf(bat_str, sizeof(bat_str), "%3d%% %.2fV", bat_pct, v_bat);
-        OLED_DrawStringSmall(&oled_dev, 62, 2, bat_str, OLED_COLOR_BLACK);
-
-        // Primary Distance Measurement in Centimeters (Clean, bold, non-overlapping)
-        if (distance_mm >= 0) {
-            OLED_Printf(&oled_dev, 4, 15, 2, "%5.1f CM", distance_cm);
-        } else {
-            OLED_Printf(&oled_dev, 4, 15, 2, " --- CM");
+        // --- 5. Read VL53L4CX Distance Sensor Data ---
+        int live_raw_mm = -1;
+        uint8_t num_objects = 0;
+        if (vl53_status == VL53LX_ERROR_NONE) {
+            if (VL53LX_GetMeasurementDataReady(p_vl53, &vl53_ready) == VL53LX_ERROR_NONE && vl53_ready != 0) {
+                if (VL53LX_GetMultiRangingData(p_vl53, &ranging_data) == VL53LX_ERROR_NONE) {
+                    num_objects = ranging_data.NumberOfObjectsFound;
+                    if (num_objects > 0) {
+                        live_raw_mm = ranging_data.RangeData[0].RangeMilliMeter;
+                    }
+                    VL53LX_ClearInterruptAndStartMeasurement(p_vl53);
+                }
+            }
         }
 
-        // Inclinometer Angles & Temp
-        OLED_DrawLine(&oled_dev, 0, 34, 128, 34, OLED_COLOR_WHITE);
-        OLED_Printf(&oled_dev, 2, 37, 1, "X:%5.1f  Y:%5.1f", scl_dev.angle_x_deg, scl_dev.angle_y_deg);
-        OLED_Printf(&oled_dev, 2, 47, 1, "Z:%5.1f  T:%4.1fC", scl_dev.angle_z_deg, scl_dev.temp_c);
+        // Update active distance (use held distance if hold_active, else live reading)
+        if (!hold_active && live_raw_mm >= 0) {
+            hold_distance_mm = live_raw_mm;
+        }
 
-        // Status Footer with Laser State Indicator
-        OLED_DrawLine(&oled_dev, 0, 56, 128, 56, OLED_COLOR_WHITE);
-        OLED_Printf(&oled_dev, 2, 57, 1, "LSR:%s | SCL:%s",
-                    laser_active ? "ON " : "OFF",
-                    scl_valid ? "OK" : "ERR");
+        float active_net_cm = Calculate_Net_Distance_CM(hold_distance_mm);
 
-        OLED_UpdateScreen(&oled_dev);
+        // Laser Elevation Pitch Angle: ToF laser points along -X axis -> Elev = -Angle X
+        float laser_pitch_elev = -scl_dev.angle_x_deg;
+        float side_roll        =  scl_dev.angle_y_deg;
+
+        // --- 6. Update 1.3" OLED Display ---
+        if (oled_ok) {
+            OLED_Clear(&oled_dev);
+
+            // Header Title Bar with Mode, Icons, and Battery Percentage
+            OLED_FillRect(&oled_dev, 0, 0, 128, 11, OLED_COLOR_WHITE);
+
+            if (in_settings) {
+                OLED_DrawStringSmall(&oled_dev, 2, 2, "SETTINGS", OLED_COLOR_BLACK);
+            } else {
+                const char *mode_names[4] = {"DIST", "LEVEL", "HEIGHT", "MEMORY"};
+                OLED_DrawStringSmall(&oled_dev, 2, 2, mode_names[encoder.mode], OLED_COLOR_BLACK);
+            }
+
+            // Draw Datum & Laser Icons in Header
+            OLED_DrawDatumIcon(&oled_dev, 52, 1, (datum_mode == 0), OLED_COLOR_BLACK);
+            OLED_DrawLaserIcon(&oled_dev, 62, 2, laser_active, OLED_COLOR_BLACK);
+            OLED_DrawBatteryIcon(&oled_dev, 74, 2, bat_pct, OLED_COLOR_BLACK);
+
+            char bat_txt[8];
+            snprintf(bat_txt, sizeof(bat_txt), "%d%%", bat_pct);
+            OLED_DrawStringSmall(&oled_dev, 92, 2, bat_txt, OLED_COLOR_BLACK);
+
+            if (in_settings) {
+                // --- SETTINGS MENU ---
+                OLED_Printf(&oled_dev, 2, 15, 1, "%c 1. UNIT: %s", (settings_item == 0) ? '>' : ' ',
+                            (unit_mode == 0) ? "CM" : (unit_mode == 1 ? "MM" : (unit_mode == 2 ? "M" : "INCH")));
+
+                OLED_Printf(&oled_dev, 2, 27, 1, "%c 2. DATUM: %s", (settings_item == 1) ? '>' : ' ',
+                            (datum_mode == 0) ? "REAR (+10cm)" : "FRONT (0cm)");
+
+                OLED_Printf(&oled_dev, 2, 39, 1, "%c 3. OFFSET: %.1f cm", (settings_item == 2) ? '>' : ' ', rear_offset_cm);
+
+                OLED_DrawLine(&oled_dev, 0, 56, 128, 56, OLED_COLOR_WHITE);
+                OLED_Printf(&oled_dev, 2, 57, 1, "PRESS:TOGGLE|LONG:EXIT");
+            }
+            else if (encoder.mode == 0) {
+                // --- MODE 0: DISTANCE MEASUREMENT ---
+                char dist_str[16];
+                Format_Distance_String(active_net_cm, unit_mode, dist_str, sizeof(dist_str));
+
+                OLED_Printf(&oled_dev, 2, 15, 2, "%s", dist_str);
+
+                OLED_DrawLine(&oled_dev, 0, 34, 128, 34, OLED_COLOR_WHITE);
+                OLED_Printf(&oled_dev, 2, 37, 1, "Elev: %5.1f deg", laser_pitch_elev);
+                OLED_Printf(&oled_dev, 2, 47, 1, "Roll: %5.1f deg", side_roll);
+
+                OLED_DrawLine(&oled_dev, 0, 56, 128, 56, OLED_COLOR_WHITE);
+                OLED_Printf(&oled_dev, 2, 57, 1, "%s | LONG:MENU", hold_active ? "HOLD [FROZEN]" : "PRESS:HOLD");
+            }
+            else if (encoder.mode == 1) {
+                // --- MODE 1: DIGITAL BUBBLE LEVEL ---
+                // Draw 2D Bubble Level target on right half of screen
+                OLED_DrawBubbleLevel(&oled_dev, 96, 33, 20, scl_dev.angle_x_deg, scl_dev.angle_y_deg);
+
+                // Print text angles on left half
+                OLED_Printf(&oled_dev, 2, 15, 1, "Elev: %5.1f deg", laser_pitch_elev);
+                OLED_Printf(&oled_dev, 2, 27, 1, "Roll: %5.1f deg", side_roll);
+                OLED_Printf(&oled_dev, 2, 39, 1, "Z:    %5.1f deg", scl_dev.angle_z_deg);
+                OLED_Printf(&oled_dev, 2, 47, 1, "T:    %5.1f C",   scl_dev.temp_c);
+
+                OLED_DrawLine(&oled_dev, 0, 56, 128, 56, OLED_COLOR_WHITE);
+                bool is_level = (fabsf(scl_dev.angle_x_deg) < 0.5f && fabsf(scl_dev.angle_y_deg) < 0.5f);
+                OLED_Printf(&oled_dev, 2, 57, 1, "%s", is_level ? "LEVEL: PERFECT [0.0]" : "LEVELING...");
+            }
+            else if (encoder.mode == 2) {
+                // --- MODE 2: INDIRECT HEIGHT (PYTHAGORAS) ---
+                float rad = DEG_TO_RAD(laser_pitch_elev);
+                float indirect_height_cm = (active_net_cm >= 0) ? (active_net_cm * sinf(rad)) : 0.0f;
+
+                char hyp_str[16], height_str[16];
+                Format_Distance_String(active_net_cm, unit_mode, hyp_str, sizeof(hyp_str));
+                Format_Distance_String(indirect_height_cm, unit_mode, height_str, sizeof(height_str));
+
+                OLED_Printf(&oled_dev, 2, 15, 1, "HYP: %s", hyp_str);
+                OLED_Printf(&oled_dev, 2, 27, 1, "ANG: %5.1f deg", laser_pitch_elev);
+
+                OLED_DrawLine(&oled_dev, 0, 37, 128, 37, OLED_COLOR_WHITE);
+                OLED_Printf(&oled_dev, 2, 40, 2, "H:%s", height_str);
+
+                OLED_DrawLine(&oled_dev, 0, 56, 128, 56, OLED_COLOR_WHITE);
+                OLED_Printf(&oled_dev, 2, 57, 1, "PYTHAGORAS HEIGHT");
+            }
+            else {
+                // --- MODE 3: HISTORY MEMORY LOG ---
+                if (history_count == 0) {
+                    OLED_Printf(&oled_dev, 18, 25, 1, "NO SAVED RECORDS");
+                    OLED_Printf(&oled_dev, 8, 38, 1, "Press SW to Hold");
+                } else {
+                    char h_val_str[16];
+                    Format_Distance_String(history_buffer[history_view_idx], unit_mode, h_val_str, sizeof(h_val_str));
+
+                    OLED_Printf(&oled_dev, 2, 15, 1, "RECORD #%02d / %02d", history_view_idx + 1, history_count);
+                    OLED_Printf(&oled_dev, 4, 28, 2, "%s", h_val_str);
+                }
+
+                OLED_DrawLine(&oled_dev, 0, 56, 128, 56, OLED_COLOR_WHITE);
+                OLED_Printf(&oled_dev, 2, 57, 1, "TURN:MODE/RECORDS");
+            }
+
+            OLED_UpdateScreen(&oled_dev);
+        }
+
+        // --- 7. Output Telemetry via USB CDC ---
+        printf("#%05lu | [MODE: %u] | [DATUM: %s] | [BAT: %.2fV (%3d%%)] | [LASER: %s] | [SCL3300: %s] Elev: %6.2f deg, Roll: %6.2f deg | [VL53L4CX] NetDist: %.1f cm (Raw: %d mm)\r\n",
+               (unsigned long)sample_count,
+               encoder.mode,
+               (datum_mode == 0) ? "REAR" : "FRONT",
+               v_bat, bat_pct,
+               laser_active ? "ON " : "OFF",
+               scl_valid ? "OK " : "ERR",
+               laser_pitch_elev, side_roll,
+               active_net_cm, hold_distance_mm);
     }
-
-    // --- 6. Output Telemetry via USB CDC ---
-    printf("#%05lu | [BAT: %.2fV (%3d%%)] | [LASER: %s] | [SCL3300] RS: %u (%s) | AngX: %6.2f deg, AngY: %6.2f deg, AngZ: %6.2f deg, Temp: %.1f C | [VL53L4CX] Dist: %5.1f cm (%d mm)\r\n",
-           (unsigned long)sample_count,
-           v_bat, bat_pct,
-           laser_active ? "ON " : "OFF",
-           scl_dev.last_rs, scl_valid ? "OK" : (scl_dev.crc_error ? "CRC_ERR" : "STATUS_ERR"),
-           scl_dev.angle_x_deg, scl_dev.angle_y_deg, scl_dev.angle_z_deg, scl_dev.temp_c,
-           distance_cm, distance_mm);
-
-    HAL_Delay(150); // Refresh rate ~6.5 Hz
   }
   /* USER CODE END 3 */
 }
@@ -615,14 +888,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB12 PB13 */
-  GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PB14 (Laser Toggle Push Button with Internal Pull-Up) */
-  GPIO_InitStruct.Pin = GPIO_PIN_14;
+  /*Configure GPIO pins : PB12 (Encoder A), PB13 (Encoder B), PB14 (Encoder SW) with Internal Pull-Ups */
+  GPIO_InitStruct.Pin = GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);

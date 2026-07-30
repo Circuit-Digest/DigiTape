@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 // Standard 5x7 Font (ASCII 32 to 126)
 static const uint8_t Font5x7[][5] = {
@@ -61,12 +62,12 @@ static const uint8_t Font5x7[][5] = {
     {0x01, 0x01, 0x7F, 0x01, 0x01}, // T
     {0x3F, 0x40, 0x40, 0x40, 0x3F}, // U
     {0x1F, 0x20, 0x40, 0x20, 0x1F}, // V
-    {0x3F, 0x40, 0x38, 0x40, 0x3F}, // W
+    {0x3F, 0x40, 0x30, 0x40, 0x3C}, // W
     {0x63, 0x14, 0x08, 0x14, 0x63}, // X
     {0x07, 0x08, 0x70, 0x08, 0x07}, // Y
     {0x61, 0x51, 0x49, 0x45, 0x43}, // Z
     {0x00, 0x7F, 0x41, 0x41, 0x00}, // [
-    {0x02, 0x04, 0x08, 0x10, 0x20}, // \
+    {0x02, 0x04, 0x08, 0x10, 0x20}, // Backslash
     {0x00, 0x41, 0x41, 0x7F, 0x00}, // ]
     {0x04, 0x02, 0x01, 0x02, 0x04}, // ^
     {0x40, 0x40, 0x40, 0x40, 0x40}, // _
@@ -220,6 +221,51 @@ void OLED_FillRect(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t w, uin
     }
 }
 
+void OLED_DrawCircle(OLED_HandleTypeDef *dev, uint8_t x0, uint8_t y0, uint8_t radius, uint8_t color)
+{
+    int f = 1 - radius;
+    int ddF_x = 1;
+    int ddF_y = -2 * radius;
+    int x = 0;
+    int y = radius;
+
+    OLED_DrawPixel(dev, x0, y0 + radius, color);
+    OLED_DrawPixel(dev, x0, y0 - radius, color);
+    OLED_DrawPixel(dev, x0 + radius, y0, color);
+    OLED_DrawPixel(dev, x0 - radius, y0, color);
+
+    while (x < y) {
+        if (f >= 0) {
+            y--;
+            ddF_y += 2;
+            f += ddF_y;
+        }
+        x++;
+        ddF_x += 2;
+        f += ddF_x;
+
+        OLED_DrawPixel(dev, x0 + x, y0 + y, color);
+        OLED_DrawPixel(dev, x0 - x, y0 + y, color);
+        OLED_DrawPixel(dev, x0 + x, y0 - y, color);
+        OLED_DrawPixel(dev, x0 - x, y0 - y, color);
+        OLED_DrawPixel(dev, x0 + y, y0 + x, color);
+        OLED_DrawPixel(dev, x0 - y, y0 + x, color);
+        OLED_DrawPixel(dev, x0 + y, y0 - x, color);
+        OLED_DrawPixel(dev, x0 - y, y0 - x, color);
+    }
+}
+
+void OLED_FillCircle(OLED_HandleTypeDef *dev, uint8_t x0, uint8_t y0, uint8_t radius, uint8_t color)
+{
+    for (int y = -radius; y <= radius; y++) {
+        for (int x = -radius; x <= radius; x++) {
+            if (x * x + y * y <= radius * radius) {
+                OLED_DrawPixel(dev, x0 + x, y0 + y, color);
+            }
+        }
+    }
+}
+
 void OLED_DrawStringSmall(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, const char *str, uint8_t color)
 {
     while (*str) {
@@ -274,5 +320,86 @@ void OLED_Printf(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t size, co
         OLED_DrawStringSmall(dev, x, y, buf, OLED_COLOR_WHITE);
     } else {
         OLED_DrawStringLarge(dev, x, y, buf, OLED_COLOR_WHITE);
+    }
+}
+
+// Graphical Icon Primitives
+void OLED_DrawBatteryIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t pct, uint8_t color)
+{
+    // Draw Battery Body (14x7 px)
+    OLED_DrawRect(dev, x, y, 14, 7, color);
+    OLED_DrawLine(dev, x + 14, y + 2, x + 14, y + 4, color); // Tip
+
+    // Fill inner bars according to percentage (0..100)
+    uint8_t fill_w = (pct * 10) / 100;
+    if (fill_w > 10) fill_w = 10;
+    if (fill_w > 0) {
+        OLED_FillRect(dev, x + 2, y + 2, fill_w, 3, color);
+    }
+}
+
+void OLED_DrawLaserIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, bool active, uint8_t color)
+{
+    if (active) {
+        // Starburst / Laser Active Icon
+        OLED_DrawLine(dev, x + 3, y,     x + 3, y + 6, color);
+        OLED_DrawLine(dev, x,     y + 3, x + 6, y + 3, color);
+        OLED_DrawPixel(dev, x + 1, y + 1, color);
+        OLED_DrawPixel(dev, x + 5, y + 1, color);
+        OLED_DrawPixel(dev, x + 1, y + 5, color);
+        OLED_DrawPixel(dev, x + 5, y + 5, color);
+    } else {
+        // Idle Dot
+        OLED_DrawRect(dev, x + 2, y + 2, 3, 3, color);
+    }
+}
+
+void OLED_DrawDatumIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, bool is_rear, uint8_t color)
+{
+    // Draw Device Body Outline
+    OLED_DrawRect(dev, x, y, 6, 8, color);
+
+    if (is_rear) {
+        // Arrow pointing from rear (bottom)
+        OLED_DrawPixel(dev, x + 2, y + 7, color);
+        OLED_DrawPixel(dev, x + 3, y + 7, color);
+        OLED_DrawLine(dev, x + 2, y + 5, x + 3, y + 5, color);
+    } else {
+        // Arrow pointing from front (top)
+        OLED_DrawPixel(dev, x + 2, y, color);
+        OLED_DrawPixel(dev, x + 3, y, color);
+        OLED_DrawLine(dev, x + 2, y + 2, x + 3, y + 2, color);
+    }
+}
+
+void OLED_DrawBubbleLevel(OLED_HandleTypeDef *dev, uint8_t center_x, uint8_t center_y, uint8_t radius, float pitch_deg, float roll_deg)
+{
+    // 1. Draw Target Circle & Crosshair
+    OLED_DrawCircle(dev, center_x, center_y, radius, OLED_COLOR_WHITE);
+    OLED_DrawCircle(dev, center_x, center_y, 2, OLED_COLOR_WHITE); // Inner center ring
+    OLED_DrawLine(dev, center_x - radius - 3, center_y, center_x + radius + 3, center_y, OLED_COLOR_WHITE);
+    OLED_DrawLine(dev, center_x, center_y - radius - 3, center_x, center_y + radius + 3, OLED_COLOR_WHITE);
+
+    // 2. OLED Screen relative mapping:
+    // - Left edge of OLED screen points to ToF/Laser (Angle X) -> dx controls Horizontal displacement
+    // - Top edge of OLED screen points to Top of PCB (Angle Y)  -> dy controls Vertical displacement
+    float dx = (pitch_deg / 15.0f) * (radius - 2);
+    float dy = (roll_deg  / 15.0f) * (radius - 2);
+
+    int bx = center_x + (int)dx;
+    int by = center_y + (int)dy;
+
+    // Clamp inside circle boundary
+    if (bx < center_x - radius + 2) bx = center_x - radius + 2;
+    if (bx > center_x + radius - 2) bx = center_x + radius - 2;
+    if (by < center_y - radius + 2) by = center_y - radius + 2;
+    if (by > center_y + radius - 2) by = center_y + radius - 2;
+
+    // 3. Draw moving bubble
+    bool is_level = (fabsf(pitch_deg) < 0.5f && fabsf(roll_deg) < 0.5f);
+    if (is_level) {
+        OLED_FillCircle(dev, bx, by, 3, OLED_COLOR_WHITE); // Solid bubble when perfectly level
+    } else {
+        OLED_DrawCircle(dev, bx, by, 2, OLED_COLOR_WHITE); // Hollow bubble when unlevel
     }
 }

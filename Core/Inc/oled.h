@@ -26,8 +26,17 @@ void OLED_DrawPixel(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t color
 void OLED_DrawLine(OLED_HandleTypeDef *dev, uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, uint8_t color);
 void OLED_DrawRect(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint8_t color);
 void OLED_FillRect(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint8_t color);
+void OLED_DrawCircle(OLED_HandleTypeDef *dev, uint8_t x0, uint8_t y0, uint8_t radius, uint8_t color);
+void OLED_FillCircle(OLED_HandleTypeDef *dev, uint8_t x0, uint8_t y0, uint8_t radius, uint8_t color);
+
 void OLED_DrawStringSmall(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, const char *str, uint8_t color);
 void OLED_DrawStringLarge(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, const char *str, uint8_t color);
 void OLED_Printf(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t size, const char *fmt, ...);
+
+// Graphical Icon Primitives
+void OLED_DrawBatteryIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t pct, uint8_t color);
+void OLED_DrawLaserIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, bool active, uint8_t color);
+void OLED_DrawDatumIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, bool is_rear, uint8_t color);
+void OLED_DrawBubbleLevel(OLED_HandleTypeDef *dev, uint8_t center_x, uint8_t center_y, uint8_t radius, float pitch_deg, float roll_deg);
 
 #endif /* OLED_H */
