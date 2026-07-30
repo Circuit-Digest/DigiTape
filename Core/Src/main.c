@@ -3,6 +3,7 @@
   ******************************************************************************
   * @file           : main.c
   * @brief          : Main program body - Commercial Grade Digital Measurement Device
+  *                   Modes: DIST, LEVEL, HEIGHT, AREA, VOLUME, CYLINDER, MAX/MIN, MEMORY
   ******************************************************************************
   * @attention
   *
@@ -29,6 +30,7 @@
 #include "vl53lx_api.h"
 #include "oled.h"
 #include <stdbool.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -42,13 +44,13 @@ typedef struct {
     bool     short_press;
     bool     long_press;
     bool     long_press_handled;
-    uint8_t  mode; // 0: DIST, 1: LEVEL, 2: HEIGHT, 3: MEMORY
 } Encoder_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define DEG_TO_RAD(deg) ((deg) * 0.017453292519943295f)
+#define M_PI_F 3.14159265358979323846f
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -85,9 +87,41 @@ uint8_t               settings_item = 0;  // 0: Unit, 1: Datum, 2: Rear Offset
 bool                  hold_active = false;
 int                   hold_distance_mm = -1;
 
+// Multi-shot Measurement States (Area, Volume, Cylinder)
+uint8_t               multi_shot_step = 0;
+float                 shot1_cm = -1.0f;
+float                 shot2_cm = -1.0f;
+float                 shot3_cm = -1.0f;
+
+// Continuous MAX/MIN Ranging Tracking
+float                 min_dist_cm = 9999.0f;
+float                 max_dist_cm = 0.0f;
+
+// History Memory Log
 float                 history_buffer[10] = {0};
 uint8_t               history_count = 0;
 uint8_t               history_view_idx = 0;
+
+// App State Machine
+typedef enum {
+    APP_STATE_MENU = 0,
+    APP_STATE_MEASURE,
+    APP_STATE_SETTINGS
+} AppState_t;
+
+AppState_t            app_state = APP_STATE_MENU;
+uint8_t               selected_mode = 0; // 0:DIST, 1:LEVEL, 2:HEIGHT, 3:AREA, 4:VOL, 5:CYL, 6:MAXMIN, 7:MEM
+
+// Double-Press Detection
+uint32_t              last_short_press_tick = 0;
+#define               DOUBLE_PRESS_WINDOW_MS 400
+
+// Boot Animation
+bool                  boot_complete = false;
+
+// Blink Timer for Multi-Shot Icons
+uint32_t              blink_tick = 0;
+bool                  blink_on = true;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -105,7 +139,10 @@ void    Encoder_Init(Encoder_t *e);
 void    Encoder_Update(Encoder_t *e);
 float   Calculate_Net_Distance_CM(int raw_mm);
 void    Format_Distance_String(float dist_cm, uint8_t unit, char *out_str, size_t max_len);
+void    Format_Area_String(float area_cm2, uint8_t unit, char *out_str, size_t max_len);
+void    Format_Volume_String(float vol_cm3, uint8_t unit, char *out_str, size_t max_len);
 void    Add_To_History(float dist_cm);
+void    Reset_Multi_Shot(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -120,7 +157,14 @@ void Encoder_Init(Encoder_t *e)
     e->short_press = false;
     e->long_press = false;
     e->long_press_handled = false;
-    e->mode = 0;
+}
+
+void Reset_Multi_Shot(void)
+{
+    multi_shot_step = 0;
+    shot1_cm = -1.0f;
+    shot2_cm = -1.0f;
+    shot3_cm = -1.0f;
 }
 
 void Encoder_Update(Encoder_t *e)
@@ -134,20 +178,21 @@ void Encoder_Update(Encoder_t *e)
         int dir = (curr_b == GPIO_PIN_SET) ? 1 : -1;
         e->counter += dir;
 
-        if (in_settings) {
+        if (app_state == APP_STATE_SETTINGS || in_settings) {
             // Scroll through 3 Settings Items (0: Unit, 1: Datum, 2: Rear Offset)
             int item = (int)settings_item + dir;
             if (item < 0) item = 2;
             if (item > 2) item = 0;
             settings_item = (uint8_t)item;
-        } else {
-            // ALWAYS update e->mode from e->counter to prevent mode lock-up
-            int m = e->counter % 4;
-            if (m < 0) m += 4;
-            e->mode = (uint8_t)m;
-
-            if (e->mode == 3 && history_count > 0) {
-                // In History Mode, scroll through history records
+        } else if (app_state == APP_STATE_MENU) {
+            // Scroll through all 8 available modes in feature phone menu grid
+            int m = (int)selected_mode + dir;
+            if (m < 0) m = 7;
+            if (m > 7) m = 0;
+            selected_mode = (uint8_t)m;
+        } else if (app_state == APP_STATE_MEASURE && selected_mode == 7) {
+            // In History Memory Mode, scroll through saved records
+            if (history_count > 0) {
                 int h_idx = (int)history_view_idx + dir;
                 if (h_idx < 0) h_idx = history_count - 1;
                 if (h_idx >= history_count) h_idx = 0;
@@ -155,8 +200,8 @@ void Encoder_Update(Encoder_t *e)
             }
         }
 
-        printf("\r\n>>> [ENCODER TURN] Counter: %ld | Mode: %u | Settings: %s (Item: %u) <<<\r\n\r\n",
-               (long)e->counter, e->mode, in_settings ? "YES" : "NO", settings_item);
+        printf("\r\n>>> [ENCODER TURN] Counter: %ld | State: %d | Mode: %u | Settings Item: %u <<<\r\n\r\n",
+               (long)e->counter, (int)app_state, selected_mode, settings_item);
     }
     e->prev_a = curr_a;
     e->prev_b = curr_b;
@@ -221,6 +266,58 @@ void Format_Distance_String(float dist_cm, uint8_t unit, char *out_str, size_t m
             break;
         default:
             snprintf(out_str, max_len, "%5.1f CM", dist_cm);
+            break;
+    }
+}
+
+void Format_Area_String(float area_cm2, uint8_t unit, char *out_str, size_t max_len)
+{
+    if (area_cm2 < 0) {
+        snprintf(out_str, max_len, " ---");
+        return;
+    }
+
+    switch (unit) {
+        case 0: // CM^2
+            snprintf(out_str, max_len, "%.1f cm2", area_cm2);
+            break;
+        case 1: // MM^2
+            snprintf(out_str, max_len, "%.0f mm2", area_cm2 * 100.0f);
+            break;
+        case 2: // M^2
+            snprintf(out_str, max_len, "%.3f m2", area_cm2 / 10000.0f);
+            break;
+        case 3: // SQ FT
+            snprintf(out_str, max_len, "%.2f sqft", area_cm2 / 929.0304f);
+            break;
+        default:
+            snprintf(out_str, max_len, "%.1f cm2", area_cm2);
+            break;
+    }
+}
+
+void Format_Volume_String(float vol_cm3, uint8_t unit, char *out_str, size_t max_len)
+{
+    if (vol_cm3 < 0) {
+        snprintf(out_str, max_len, " ---");
+        return;
+    }
+
+    switch (unit) {
+        case 0: // CM^3
+            snprintf(out_str, max_len, "%.1f cm3", vol_cm3);
+            break;
+        case 1: // MM^3
+            snprintf(out_str, max_len, "%.0f mm3", vol_cm3 * 1000.0f);
+            break;
+        case 2: // M^3
+            snprintf(out_str, max_len, "%.4f m3", vol_cm3 / 1000000.0f);
+            break;
+        case 3: // CU FT
+            snprintf(out_str, max_len, "%.3f cuft", vol_cm3 / 28316.846592f);
+            break;
+        default:
+            snprintf(out_str, max_len, "%.1f cm3", vol_cm3);
             break;
     }
 }
@@ -303,11 +400,22 @@ int main(void)
   bool oled_ok = OLED_Init(&oled_dev, &hi2c2);
   if (oled_ok) {
       printf(" -> [OK] 1.3\" OLED Display Initialized (Addr: 0x3C)\r\n");
+      // Phase 1: Sweep line animation
+      for (int sweep = 0; sweep < 128; sweep += 16) {
+          OLED_Clear(&oled_dev);
+          OLED_FillRect(&oled_dev, 0, 0, sweep + 16, 64, OLED_COLOR_WHITE);
+          OLED_UpdateScreen(&oled_dev);
+          HAL_Delay(25);
+      }
+      // Phase 2: Brand reveal
       OLED_Clear(&oled_dev);
-      OLED_Printf(&oled_dev, 12, 10, 2, "DIGI-TAPE");
-      OLED_Printf(&oled_dev, 30, 32, 1, "PRO METER V1.0");
-      OLED_Printf(&oled_dev, 8, 48, 1, "Initializing...");
+      OLED_DrawString3x(&oled_dev, 10, 2, "DIGI", OLED_COLOR_WHITE);
+      OLED_DrawString3x(&oled_dev, 14, 24, "TAPE", OLED_COLOR_WHITE);
+      OLED_DrawStringSmall(&oled_dev, 28, 48, "PRO METER V2.0", OLED_COLOR_WHITE);
+      OLED_DrawLine(&oled_dev, 10, 57, 118, 57, OLED_COLOR_WHITE);
       OLED_UpdateScreen(&oled_dev);
+      HAL_Delay(2000);
+      boot_complete = true;
   } else {
       printf(" -> [WARN] OLED Display Not Detected on I2C2\r\n");
   }
@@ -368,53 +476,25 @@ int main(void)
         last_ui_tick = HAL_GetTick();
         sample_count++;
 
-        // --- Handle Long Press (> 800ms): Enter / Exit Settings Menu ---
+        if (HAL_GetTick() - blink_tick >= 500) {
+            blink_tick = HAL_GetTick();
+            blink_on = !blink_on;
+        }
+
+        // --- Handle Long Press (> 800ms): Toggle Settings Menu Overlay ---
         if (encoder.long_press) {
             encoder.long_press = false;
-            in_settings = !in_settings;
-            printf("\r\n>>> [LONG PRESS] Settings Menu %s <<<\r\n\r\n", in_settings ? "ENTERED" : "EXITED");
-        }
-
-        // --- Handle Short Press (< 500ms): Hold / Save or Toggle Settings ---
-        if (encoder.short_press) {
-            encoder.short_press = false;
-
-            if (in_settings) {
-                // Toggle Settings Values
-                if (settings_item == 0) { // Unit
-                    unit_mode = (unit_mode + 1) % 4;
-                } else if (settings_item == 1) { // Datum
-                    datum_mode = (datum_mode + 1) % 2;
-                } else if (settings_item == 2) { // Rear Offset Adjust
-                    rear_offset_cm += 1.0f;
-                    if (rear_offset_cm > 20.0f) rear_offset_cm = 0.0f;
-                }
-                printf("\r\n>>> [SETTINGS TOGGLE] Unit: %u | Datum: %u | Offset: %.1fcm <<<\r\n\r\n",
-                       unit_mode, datum_mode, rear_offset_cm);
+            if (app_state == APP_STATE_SETTINGS || in_settings) {
+                app_state = APP_STATE_MENU;
+                in_settings = false;
             } else {
-                // Hold/Freeze Measurement & Toggle Laser
-                hold_active = !hold_active;
-                laser_active = !hold_active; // Turn laser on during live ranging, off when held
-                HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, laser_active ? GPIO_PIN_SET : GPIO_PIN_RESET);
-
-                if (hold_active) {
-                    float net_cm = Calculate_Net_Distance_CM(hold_distance_mm);
-                    Add_To_History(net_cm);
-                    printf("\r\n>>> [HOLD & SAVE] Measurement Frozen: %.1f CM | Saved to History #01 <<<\r\n\r\n", net_cm);
-                } else {
-                    printf("\r\n>>> [UNHOLD] Resumed Live Ranging <<<\r\n\r\n");
-                }
+                app_state = APP_STATE_SETTINGS;
+                in_settings = true;
             }
+            printf("\r\n>>> [LONG PRESS] Settings Menu %s <<<\r\n\r\n", (app_state == APP_STATE_SETTINGS) ? "ENTERED" : "EXITED");
         }
 
-        // --- 3. Read 1S Li-Ion Battery Voltage & Percentage via ADC3 (PB1) ---
-        float v_bat = Read_Battery_Voltage();
-        uint8_t bat_pct = Calculate_Battery_Percentage(v_bat);
-
-        // --- 4. Read SCL3300 Inclinometer Data ---
-        bool scl_valid = SCL3300_ReadData(&scl_dev);
-
-        // --- 5. Read VL53L4CX Distance Sensor Data ---
+        // --- Read Live Ranging Distance ---
         int live_raw_mm = -1;
         uint8_t num_objects = 0;
         if (vl53_status == VL53LX_ERROR_NONE) {
@@ -429,124 +509,364 @@ int main(void)
             }
         }
 
-        // Update active distance (use held distance if hold_active, else live reading)
         if (!hold_active && live_raw_mm >= 0) {
             hold_distance_mm = live_raw_mm;
         }
 
         float active_net_cm = Calculate_Net_Distance_CM(hold_distance_mm);
 
+        // Update MAX / MIN Continuous Ranging Tracker in MAXMIN Mode (selected_mode == 6)
+        if (app_state == APP_STATE_MEASURE && selected_mode == 6 && active_net_cm > 0.0f) {
+            if (active_net_cm < min_dist_cm) min_dist_cm = active_net_cm;
+            if (active_net_cm > max_dist_cm) max_dist_cm = active_net_cm;
+        }
+
+        // --- Handle Switch Presses (Single Press: Select/Action | Double Press: Global BACK to Menu) ---
+        if (encoder.short_press) {
+            encoder.short_press = false;
+
+            if (HAL_GetTick() - last_short_press_tick < DOUBLE_PRESS_WINDOW_MS) {
+                // --- DOUBLE PRESS: GLOBAL BACK TO MAIN MENU SCREEN ---
+                last_short_press_tick = 0;
+                app_state = APP_STATE_MENU;
+                in_settings = false;
+                hold_active = false;
+                Reset_Multi_Shot();
+                printf("\r\n>>> [DOUBLE PRESS: GO BACK TO MAIN MENU] <<<\r\n\r\n");
+            } else {
+                last_short_press_tick = HAL_GetTick();
+
+                // --- SINGLE PRESS: CONFIRMATION / SELECTION / MODE ACTION ---
+                if (app_state == APP_STATE_MENU) {
+                    app_state = APP_STATE_MEASURE;
+                    hold_active = false;
+                    Reset_Multi_Shot();
+                    printf("\r\n>>> [SINGLE PRESS] Confirmed & Entered Mode %u <<<\r\n\r\n", selected_mode);
+                } else if (app_state == APP_STATE_SETTINGS || in_settings) {
+                    // Toggle Settings Values
+                    if (settings_item == 0) { // Unit
+                        unit_mode = (unit_mode + 1) % 4;
+                    } else if (settings_item == 1) { // Datum
+                        datum_mode = (datum_mode + 1) % 2;
+                    } else if (settings_item == 2) { // Rear Offset Adjust
+                        rear_offset_cm += 1.0f;
+                        if (rear_offset_cm > 20.0f) rear_offset_cm = 0.0f;
+                    }
+                    printf("\r\n>>> [SETTINGS TOGGLE] Unit: %u | Datum: %u | Offset: %.1fcm <<<\r\n\r\n",
+                           unit_mode, datum_mode, rear_offset_cm);
+                } else if (app_state == APP_STATE_MEASURE) {
+                    if (selected_mode == 0 || selected_mode == 2) { // DIST or HEIGHT
+                        hold_active = !hold_active;
+                        if (hold_active) {
+                            Add_To_History(active_net_cm);
+                            printf("\r\n>>> [HOLD & SAVE] Measurement Frozen: %.1f CM <<<\r\n\r\n", active_net_cm);
+                        } else {
+                            printf("\r\n>>> [UNHOLD] Resumed Live Ranging <<<\r\n\r\n");
+                        }
+                    } else if (selected_mode == 6) { // MAXMIN
+                        min_dist_cm = 9999.0f;
+                        max_dist_cm = 0.0f;
+                        printf("\r\n>>> [MAX/MIN RESET] Reset Min/Max Trackers <<<\r\n\r\n");
+                    } else if (selected_mode == 3) { // AREA MODE MULTI-SHOT
+                        if (multi_shot_step == 0) {
+                            shot1_cm = active_net_cm;
+                            multi_shot_step = 1;
+                            printf("\r\n>>> [AREA SHOT 1] Length: %.1f CM <<<\r\n\r\n", shot1_cm);
+                        } else if (multi_shot_step == 1) {
+                            shot2_cm = active_net_cm;
+                            multi_shot_step = 2;
+                            Add_To_History(shot1_cm * shot2_cm / 100.0f);
+                            printf("\r\n>>> [AREA SHOT 2] Width: %.1f CM | Area: %.2f cm2 <<<\r\n\r\n", shot2_cm, shot1_cm * shot2_cm);
+                        } else {
+                            Reset_Multi_Shot();
+                        }
+                    } else if (selected_mode == 4) { // VOLUME MODE MULTI-SHOT
+                        if (multi_shot_step == 0) {
+                            shot1_cm = active_net_cm;
+                            multi_shot_step = 1;
+                        } else if (multi_shot_step == 1) {
+                            shot2_cm = active_net_cm;
+                            multi_shot_step = 2;
+                        } else if (multi_shot_step == 2) {
+                            shot3_cm = active_net_cm;
+                            multi_shot_step = 3;
+                            printf("\r\n>>> [VOLUME RESULT] L:%.1f W:%.1f H:%.1f | Vol:%.1f cm3 <<<\r\n\r\n",
+                                   shot1_cm, shot2_cm, shot3_cm, shot1_cm * shot2_cm * shot3_cm);
+                        } else {
+                            Reset_Multi_Shot();
+                        }
+                    } else if (selected_mode == 5) { // CYLINDER MODE MULTI-SHOT
+                        if (multi_shot_step == 0) {
+                            shot1_cm = active_net_cm;
+                            multi_shot_step = 1;
+                        } else if (multi_shot_step == 1) {
+                            shot2_cm = active_net_cm;
+                            multi_shot_step = 2;
+                            float radius = shot1_cm / 2.0f;
+                            float area = M_PI_F * radius * radius;
+                            float vol = area * shot2_cm;
+                            printf("\r\n>>> [CYLINDER RESULT] D:%.1f H:%.1f | Area:%.1f Vol:%.1f <<<\r\n\r\n",
+                                   shot1_cm, shot2_cm, area, vol);
+                        } else {
+                            Reset_Multi_Shot();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Laser auto-ON in active measurement modes (DIST, HEIGHT, AREA, VOL, CYL, MAXMIN)
+        bool should_laser = (app_state == APP_STATE_MEASURE &&
+                            (selected_mode == 0 || selected_mode == 2 || selected_mode == 3 || selected_mode == 4 || selected_mode == 5 || selected_mode == 6) &&
+                            !hold_active);
+        if (should_laser != laser_active) {
+            laser_active = should_laser;
+            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, laser_active ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        }
+
+        // --- 3. Read 1S Li-Ion Battery Voltage & Percentage via ADC3 (PB1) ---
+        float v_bat = Read_Battery_Voltage();
+        uint8_t bat_pct = Calculate_Battery_Percentage(v_bat);
+
+        // --- 4. Read SCL3300 Inclinometer Data ---
+        bool scl_valid = SCL3300_ReadData(&scl_dev);
+
         // Laser Elevation Pitch Angle: ToF laser points along -X axis -> Elev = -Angle X
         float laser_pitch_elev = -scl_dev.angle_x_deg;
         float side_roll        =  scl_dev.angle_y_deg;
 
-        // --- 6. Update 1.3" OLED Display ---
+        // --- 5. Update 1.3\" OLED Display ---
         if (oled_ok) {
             OLED_Clear(&oled_dev);
 
-            // Header Title Bar with Mode, Icons, and Battery Percentage
-            OLED_FillRect(&oled_dev, 0, 0, 128, 11, OLED_COLOR_WHITE);
+            if (app_state == APP_STATE_MENU) {
+                // --- FEATURE PHONE MAIN MENU SCREEN (ALL 8 MODES IN SINGLE MENU GRID) ---
+                OLED_FillRect(&oled_dev, 0, 0, 128, 12, OLED_COLOR_WHITE);
+                OLED_DrawStringSmall(&oled_dev, 2, 2, "SELECT MODE", OLED_COLOR_BLACK);
+                OLED_DrawBatteryIcon(&oled_dev, 94, 2, bat_pct, OLED_COLOR_BLACK);
+                char bat_txt[6];
+                snprintf(bat_txt, sizeof(bat_txt), "%d%%", bat_pct);
+                OLED_DrawStringSmall(&oled_dev, 112, 2, bat_txt, OLED_COLOR_BLACK);
 
-            if (in_settings) {
-                OLED_DrawStringSmall(&oled_dev, 2, 2, "SETTINGS", OLED_COLOR_BLACK);
-            } else {
-                const char *mode_names[4] = {"DIST", "LEVEL", "HEIGHT", "MEMORY"};
-                OLED_DrawStringSmall(&oled_dev, 2, 2, mode_names[encoder.mode], OLED_COLOR_BLACK);
-            }
+                // 4x2 Mode Grid (Y: 15..48) with graphical icons
+                for (uint8_t i = 0; i < 8; i++) {
+                    uint8_t row = i / 4;
+                    uint8_t col = i % 4;
+                    uint8_t x = 2 + col * 32;
+                    uint8_t y = 15 + row * 18;
 
-            // Draw Datum & Laser Icons in Header
-            OLED_DrawDatumIcon(&oled_dev, 52, 1, (datum_mode == 0), OLED_COLOR_BLACK);
-            OLED_DrawLaserIcon(&oled_dev, 62, 2, laser_active, OLED_COLOR_BLACK);
-            OLED_DrawBatteryIcon(&oled_dev, 74, 2, bat_pct, OLED_COLOR_BLACK);
-
-            char bat_txt[8];
-            snprintf(bat_txt, sizeof(bat_txt), "%d%%", bat_pct);
-            OLED_DrawStringSmall(&oled_dev, 92, 2, bat_txt, OLED_COLOR_BLACK);
-
-            if (in_settings) {
-                // --- SETTINGS MENU ---
-                OLED_Printf(&oled_dev, 2, 15, 1, "%c 1. UNIT: %s", (settings_item == 0) ? '>' : ' ',
-                            (unit_mode == 0) ? "CM" : (unit_mode == 1 ? "MM" : (unit_mode == 2 ? "M" : "INCH")));
-
-                OLED_Printf(&oled_dev, 2, 27, 1, "%c 2. DATUM: %s", (settings_item == 1) ? '>' : ' ',
-                            (datum_mode == 0) ? "REAR (+10cm)" : "FRONT (0cm)");
-
-                OLED_Printf(&oled_dev, 2, 39, 1, "%c 3. OFFSET: %.1f cm", (settings_item == 2) ? '>' : ' ', rear_offset_cm);
-
-                OLED_DrawLine(&oled_dev, 0, 56, 128, 56, OLED_COLOR_WHITE);
-                OLED_Printf(&oled_dev, 2, 57, 1, "PRESS:TOGGLE|LONG:EXIT");
-            }
-            else if (encoder.mode == 0) {
-                // --- MODE 0: DISTANCE MEASUREMENT ---
-                char dist_str[16];
-                Format_Distance_String(active_net_cm, unit_mode, dist_str, sizeof(dist_str));
-
-                OLED_Printf(&oled_dev, 2, 15, 2, "%s", dist_str);
-
-                OLED_DrawLine(&oled_dev, 0, 34, 128, 34, OLED_COLOR_WHITE);
-                OLED_Printf(&oled_dev, 2, 37, 1, "Elev: %5.1f deg", laser_pitch_elev);
-                OLED_Printf(&oled_dev, 2, 47, 1, "Roll: %5.1f deg", side_roll);
-
-                OLED_DrawLine(&oled_dev, 0, 56, 128, 56, OLED_COLOR_WHITE);
-                OLED_Printf(&oled_dev, 2, 57, 1, "%s | LONG:MENU", hold_active ? "HOLD [FROZEN]" : "PRESS:HOLD");
-            }
-            else if (encoder.mode == 1) {
-                // --- MODE 1: DIGITAL BUBBLE LEVEL ---
-                // Draw 2D Bubble Level target on right half of screen
-                OLED_DrawBubbleLevel(&oled_dev, 96, 33, 20, scl_dev.angle_x_deg, scl_dev.angle_y_deg);
-
-                // Print text angles on left half
-                OLED_Printf(&oled_dev, 2, 15, 1, "Elev: %5.1f deg", laser_pitch_elev);
-                OLED_Printf(&oled_dev, 2, 27, 1, "Roll: %5.1f deg", side_roll);
-                OLED_Printf(&oled_dev, 2, 39, 1, "Z:    %5.1f deg", scl_dev.angle_z_deg);
-                OLED_Printf(&oled_dev, 2, 47, 1, "T:    %5.1f C",   scl_dev.temp_c);
-
-                OLED_DrawLine(&oled_dev, 0, 56, 128, 56, OLED_COLOR_WHITE);
-                bool is_level = (fabsf(scl_dev.angle_x_deg) < 0.5f && fabsf(scl_dev.angle_y_deg) < 0.5f);
-                OLED_Printf(&oled_dev, 2, 57, 1, "%s", is_level ? "LEVEL: PERFECT [0.0]" : "LEVELING...");
-            }
-            else if (encoder.mode == 2) {
-                // --- MODE 2: INDIRECT HEIGHT (PYTHAGORAS) ---
-                float rad = DEG_TO_RAD(laser_pitch_elev);
-                float indirect_height_cm = (active_net_cm >= 0) ? (active_net_cm * sinf(rad)) : 0.0f;
-
-                char hyp_str[16], height_str[16];
-                Format_Distance_String(active_net_cm, unit_mode, hyp_str, sizeof(hyp_str));
-                Format_Distance_String(indirect_height_cm, unit_mode, height_str, sizeof(height_str));
-
-                OLED_Printf(&oled_dev, 2, 15, 1, "HYP: %s", hyp_str);
-                OLED_Printf(&oled_dev, 2, 27, 1, "ANG: %5.1f deg", laser_pitch_elev);
-
-                OLED_DrawLine(&oled_dev, 0, 37, 128, 37, OLED_COLOR_WHITE);
-                OLED_Printf(&oled_dev, 2, 40, 2, "H:%s", height_str);
-
-                OLED_DrawLine(&oled_dev, 0, 56, 128, 56, OLED_COLOR_WHITE);
-                OLED_Printf(&oled_dev, 2, 57, 1, "PYTHAGORAS HEIGHT");
-            }
-            else {
-                // --- MODE 3: HISTORY MEMORY LOG ---
-                if (history_count == 0) {
-                    OLED_Printf(&oled_dev, 18, 25, 1, "NO SAVED RECORDS");
-                    OLED_Printf(&oled_dev, 8, 38, 1, "Press SW to Hold");
-                } else {
-                    char h_val_str[16];
-                    Format_Distance_String(history_buffer[history_view_idx], unit_mode, h_val_str, sizeof(h_val_str));
-
-                    OLED_Printf(&oled_dev, 2, 15, 1, "RECORD #%02d / %02d", history_view_idx + 1, history_count);
-                    OLED_Printf(&oled_dev, 4, 28, 2, "%s", h_val_str);
+                    if (i == selected_mode) {
+                        OLED_FillRect(&oled_dev, x, y, 30, 16, OLED_COLOR_WHITE);
+                        OLED_DrawMenuModeIcon(&oled_dev, x + 7, y + 2, i, OLED_COLOR_BLACK);
+                    } else {
+                        OLED_DrawRect(&oled_dev, x, y, 30, 16, OLED_COLOR_WHITE);
+                        OLED_DrawMenuModeIcon(&oled_dev, x + 7, y + 2, i, OLED_COLOR_WHITE);
+                    }
                 }
 
-                OLED_DrawLine(&oled_dev, 0, 56, 128, 56, OLED_COLOR_WHITE);
-                OLED_Printf(&oled_dev, 2, 57, 1, "TURN:MODE/RECORDS");
+                // Bottom Title Banner (Y: 51..63)
+                OLED_DrawLine(&oled_dev, 0, 50, 127, 50, OLED_COLOR_WHITE);
+                const char *mode_titles[8] = {
+                    "> 1. DISTANCE METER",
+                    "> 2. SPIRIT LEVEL",
+                    "> 3. HEIGHT (PYTH)",
+                    "> 4. AREA CALCULATOR",
+                    "> 5. VOLUME CALCULATOR",
+                    "> 6. CYLINDER CALCULATOR",
+                    "> 7. MAX/MIN TRACKING",
+                    "> 8. MEMORY LOG"
+                };
+                OLED_DrawStringSmall(&oled_dev, 2, 53, mode_titles[selected_mode], OLED_COLOR_WHITE);
+            } else if (app_state == APP_STATE_SETTINGS || in_settings) {
+                // --- FULL SCREEN SETTINGS OVERLAY ---
+                OLED_FillRect(&oled_dev, 0, 0, 128, 12, OLED_COLOR_WHITE);
+                OLED_DrawStringSmall(&oled_dev, 2, 2, "SETTINGS", OLED_COLOR_BLACK);
+                OLED_DrawLine(&oled_dev, 0, 12, 127, 12, OLED_COLOR_WHITE);
+
+                const char *unit_names[] = {"CM", "MM", "M", "INCH"};
+                const char *datum_names[] = {"REAR", "FRONT"};
+                char offset_str[12];
+                snprintf(offset_str, sizeof(offset_str), "%.1f cm", rear_offset_cm);
+
+                for (int i = 0; i < 3; i++) {
+                    int row_y = 16 + i * 16;
+                    if (i == settings_item) {
+                        OLED_FillRect(&oled_dev, 0, row_y, 128, 14, OLED_COLOR_WHITE);
+                    }
+                    uint8_t color = (i == settings_item) ? OLED_COLOR_BLACK : OLED_COLOR_WHITE;
+                    
+                    switch (i) {
+                        case 0:
+                            OLED_DrawStringSmall(&oled_dev, 4, row_y + 3, "UNIT", color);
+                            OLED_DrawStringSmall(&oled_dev, 80, row_y + 3, unit_names[unit_mode], color);
+                            break;
+                        case 1:
+                            OLED_DrawStringSmall(&oled_dev, 4, row_y + 3, "DATUM", color);
+                            OLED_DrawStringSmall(&oled_dev, 80, row_y + 3, datum_names[datum_mode], color);
+                            break;
+                        case 2:
+                            OLED_DrawStringSmall(&oled_dev, 4, row_y + 3, "OFFSET", color);
+                            OLED_DrawStringSmall(&oled_dev, 80, row_y + 3, offset_str, color);
+                            break;
+                    }
+                }
+            } else {
+                // --- APP_STATE_MEASURE: ACTIVE MEASUREMENT DISPLAY ---
+                uint8_t active_mode = selected_mode;
+
+                if (active_mode == 1) {
+                    OLED_DrawFullScreenBubble(&oled_dev, scl_dev.angle_x_deg, scl_dev.angle_y_deg, 
+                                              scl_dev.angle_z_deg, scl_dev.temp_c);
+                } else {
+                    OLED_FillRect(&oled_dev, 0, 0, 128, 12, OLED_COLOR_WHITE);
+
+                    const char *mode_names[8] = {"DIST", "LEVEL", "HEIGHT", "AREA", "VOLUME", "CYL", "MAXMIN", "MEMORY"};
+                    OLED_DrawStringSmall(&oled_dev, 2, 2, mode_names[active_mode], OLED_COLOR_BLACK);
+
+                    OLED_DrawBatteryIcon(&oled_dev, 94, 2, bat_pct, OLED_COLOR_BLACK);
+                    char bat_txt[6];
+                    snprintf(bat_txt, sizeof(bat_txt), "%d%%", bat_pct);
+                    OLED_DrawStringSmall(&oled_dev, 112, 2, bat_txt, OLED_COLOR_BLACK);
+                    OLED_DrawDatumIcon(&oled_dev, 50, 1, (datum_mode == 0), OLED_COLOR_BLACK);
+                    OLED_DrawLaserIcon(&oled_dev, 62, 2, laser_active, OLED_COLOR_BLACK);
+                    OLED_DrawLine(&oled_dev, 0, 12, 127, 12, OLED_COLOR_WHITE);
+
+                    char prim_str[16];
+                    char sec1[32] = {0};
+                    char sec2[32] = {0};
+
+                    if (active_mode == 0) {
+                        snprintf(sec1, sizeof(sec1), "Elev: %5.1f deg", laser_pitch_elev);
+                        snprintf(sec2, sizeof(sec2), "Roll: %5.1f deg", side_roll);
+                        Format_Distance_String(active_net_cm, unit_mode, prim_str, sizeof(prim_str));
+                        OLED_DrawStringSmall(&oled_dev, 2, 14, sec1, OLED_COLOR_WHITE);
+                        OLED_DrawStringSmall(&oled_dev, 2, 24, sec2, OLED_COLOR_WHITE);
+                    } else if (active_mode == 2) {
+                        float rad = DEG_TO_RAD(laser_pitch_elev);
+                        float indirect_height_cm = (active_net_cm >= 0) ? (active_net_cm * sinf(rad)) : 0.0f;
+                        char hyp_str[16];
+                        Format_Distance_String(active_net_cm, unit_mode, hyp_str, sizeof(hyp_str));
+                        Format_Distance_String(indirect_height_cm, unit_mode, prim_str, sizeof(prim_str));
+                        snprintf(sec1, sizeof(sec1), "HYP: %s", hyp_str);
+                        snprintf(sec2, sizeof(sec2), "ANG: %5.1f deg", laser_pitch_elev);
+                        OLED_DrawStringSmall(&oled_dev, 2, 14, sec1, OLED_COLOR_WHITE);
+                        OLED_DrawStringSmall(&oled_dev, 2, 24, sec2, OLED_COLOR_WHITE);
+                        OLED_DrawTriangleIcon(&oled_dev, 110, 14);
+                    } else if (active_mode == 6) {
+                        char min_str[16], max_str[16];
+                        Format_Distance_String((min_dist_cm < 9990.0f) ? min_dist_cm : -1.0f, unit_mode, min_str, sizeof(min_str));
+                        Format_Distance_String((max_dist_cm > 0.0f) ? max_dist_cm : -1.0f, unit_mode, max_str, sizeof(max_str));
+                        snprintf(sec1, sizeof(sec1), "MIN: %s", min_str);
+                        snprintf(sec2, sizeof(sec2), "MAX: %s", max_str);
+                        Format_Distance_String(active_net_cm, unit_mode, prim_str, sizeof(prim_str));
+                        OLED_DrawStringSmall(&oled_dev, 2, 14, sec1, OLED_COLOR_WHITE);
+                        OLED_DrawStringSmall(&oled_dev, 2, 24, sec2, OLED_COLOR_WHITE);
+                    } else if (active_mode == 3) {
+                        char l_str[16], w_str[16];
+                        Format_Distance_String(shot1_cm, unit_mode, l_str, sizeof(l_str));
+                        Format_Distance_String(shot2_cm, unit_mode, w_str, sizeof(w_str));
+                        char live_str[16];
+                        Format_Distance_String(active_net_cm, unit_mode, live_str, sizeof(live_str));
+                        
+                        if (multi_shot_step == 0) {
+                            snprintf(sec1, sizeof(sec1), "L: ---");
+                            OLED_DrawRectIcon(&oled_dev, 100, 14, 0, blink_on);
+                            snprintf(prim_str, sizeof(prim_str), "%s", live_str);
+                        } else if (multi_shot_step == 1) {
+                            snprintf(sec1, sizeof(sec1), "L: %s", l_str);
+                            OLED_DrawRectIcon(&oled_dev, 100, 14, 1, blink_on);
+                            snprintf(prim_str, sizeof(prim_str), "%s", live_str);
+                        } else {
+                            snprintf(sec1, sizeof(sec1), "L: %s", l_str);
+                            snprintf(sec2, sizeof(sec2), "W: %s", w_str);
+                            OLED_DrawRectIcon(&oled_dev, 100, 14, 2, false);
+                            float area_cm2 = shot1_cm * shot2_cm;
+                            Format_Area_String(area_cm2, unit_mode, prim_str, sizeof(prim_str));
+                        }
+                        OLED_DrawStringSmall(&oled_dev, 2, 14, sec1, OLED_COLOR_WHITE);
+                        if (sec2[0]) OLED_DrawStringSmall(&oled_dev, 2, 24, sec2, OLED_COLOR_WHITE);
+                    } else if (active_mode == 4) {
+                        char l_str[16], w_str[16], h_str[16];
+                        Format_Distance_String(shot1_cm, unit_mode, l_str, sizeof(l_str));
+                        Format_Distance_String(shot2_cm, unit_mode, w_str, sizeof(w_str));
+                        Format_Distance_String(shot3_cm, unit_mode, h_str, sizeof(h_str));
+                        char live_str[16];
+                        Format_Distance_String(active_net_cm, unit_mode, live_str, sizeof(live_str));
+
+                        if (multi_shot_step == 0) {
+                            snprintf(sec1, sizeof(sec1), "L: ---");
+                            OLED_DrawCubeIcon(&oled_dev, 100, 14, 0, blink_on);
+                            snprintf(prim_str, sizeof(prim_str), "%s", live_str);
+                        } else if (multi_shot_step == 1) {
+                            snprintf(sec1, sizeof(sec1), "L: %s", l_str);
+                            OLED_DrawCubeIcon(&oled_dev, 100, 14, 1, blink_on);
+                            snprintf(prim_str, sizeof(prim_str), "%s", live_str);
+                        } else if (multi_shot_step == 2) {
+                            snprintf(sec1, sizeof(sec1), "L:%s W:%s", l_str, w_str);
+                            snprintf(sec2, sizeof(sec2), "H: ---");
+                            OLED_DrawCubeIcon(&oled_dev, 100, 14, 2, blink_on);
+                            snprintf(prim_str, sizeof(prim_str), "%s", live_str);
+                        } else {
+                            snprintf(sec1, sizeof(sec1), "L:%s W:%s", l_str, w_str);
+                            snprintf(sec2, sizeof(sec2), "H: %s", h_str);
+                            OLED_DrawCubeIcon(&oled_dev, 100, 14, 3, false);
+                            float vol_cm3 = shot1_cm * shot2_cm * shot3_cm;
+                            Format_Volume_String(vol_cm3, unit_mode, prim_str, sizeof(prim_str));
+                        }
+                        OLED_DrawStringSmall(&oled_dev, 2, 14, sec1, OLED_COLOR_WHITE);
+                        if (sec2[0]) OLED_DrawStringSmall(&oled_dev, 2, 24, sec2, OLED_COLOR_WHITE);
+                    } else if (active_mode == 5) {
+                        char d_str[16], h_str[16];
+                        Format_Distance_String(shot1_cm, unit_mode, d_str, sizeof(d_str));
+                        Format_Distance_String(shot2_cm, unit_mode, h_str, sizeof(h_str));
+                        char live_str[16];
+                        Format_Distance_String(active_net_cm, unit_mode, live_str, sizeof(live_str));
+
+                        if (multi_shot_step == 0) {
+                            snprintf(sec1, sizeof(sec1), "D: ---");
+                            OLED_DrawCylinderIcon(&oled_dev, 100, 14, 0, blink_on);
+                            snprintf(prim_str, sizeof(prim_str), "%s", live_str);
+                        } else if (multi_shot_step == 1) {
+                            snprintf(sec1, sizeof(sec1), "D: %s", d_str);
+                            OLED_DrawCylinderIcon(&oled_dev, 100, 14, 1, blink_on);
+                            snprintf(prim_str, sizeof(prim_str), "%s", live_str);
+                        } else {
+                            snprintf(sec1, sizeof(sec1), "D: %s", d_str);
+                            snprintf(sec2, sizeof(sec2), "H: %s", h_str);
+                            OLED_DrawCylinderIcon(&oled_dev, 100, 14, 2, false);
+                            float r = shot1_cm / 2.0f;
+                            float vol_cm3 = M_PI_F * r * r * shot2_cm;
+                            Format_Volume_String(vol_cm3, unit_mode, prim_str, sizeof(prim_str));
+                        }
+                        OLED_DrawStringSmall(&oled_dev, 2, 14, sec1, OLED_COLOR_WHITE);
+                        if (sec2[0]) OLED_DrawStringSmall(&oled_dev, 2, 24, sec2, OLED_COLOR_WHITE);
+                    } else if (active_mode == 7) {
+                        if (history_count == 0) {
+                            snprintf(sec1, sizeof(sec1), "NO SAVED RECORDS");
+                            snprintf(prim_str, sizeof(prim_str), " ---");
+                        } else {
+                            snprintf(sec1, sizeof(sec1), "RECORD #%02d / %02d", history_view_idx + 1, history_count);
+                            Format_Distance_String(history_buffer[history_view_idx], unit_mode, prim_str, sizeof(prim_str));
+                        }
+                        OLED_DrawStringSmall(&oled_dev, 2, 14, sec1, OLED_COLOR_WHITE);
+                    }
+
+                    OLED_DrawLine(&oled_dev, 0, 34, 127, 34, OLED_COLOR_WHITE);
+                    // Primary reading zone: use 2x Large font (12px/char) for reliable fit
+                    // Right-align the primary string: 128 - (strlen * 12) - 2
+                    uint8_t prim_len = strlen(prim_str);
+                    uint8_t prim_x = (prim_len * 12 < 126) ? (126 - prim_len * 12) : 2;
+                    OLED_DrawStringLarge(&oled_dev, prim_x, 40, prim_str, OLED_COLOR_WHITE);
+                }
             }
 
             OLED_UpdateScreen(&oled_dev);
         }
 
         // --- 7. Output Telemetry via USB CDC ---
-        printf("#%05lu | [MODE: %u] | [DATUM: %s] | [BAT: %.2fV (%3d%%)] | [LASER: %s] | [SCL3300: %s] Elev: %6.2f deg, Roll: %6.2f deg | [VL53L4CX] NetDist: %.1f cm (Raw: %d mm)\r\n",
+        printf("#%05lu | [STATE:%d MODE:%u] | [DATUM:%s] | [BAT:%.2fV(%3d%%)] | [LASER:%s] | [SCL3300:%s] E:%6.2f R:%6.2f | [VL53] D:%.1fcm (R:%dmm)\r\n",
                (unsigned long)sample_count,
-               encoder.mode,
+               (int)app_state, selected_mode,
                (datum_mode == 0) ? "REAR" : "FRONT",
                v_bat, bat_pct,
                laser_active ? "ON " : "OFF",

@@ -38,5 +38,13 @@ void OLED_DrawBatteryIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t
 void OLED_DrawLaserIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, bool active, uint8_t color);
 void OLED_DrawDatumIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, bool is_rear, uint8_t color);
 void OLED_DrawBubbleLevel(OLED_HandleTypeDef *dev, uint8_t center_x, uint8_t center_y, uint8_t radius, float pitch_deg, float roll_deg);
+void OLED_DrawString3x(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, const char *str, uint8_t color);
+void OLED_DrawInvertedString(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, const char *str, uint8_t pad_w, uint8_t pad_h);
+void OLED_DrawRectIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t active_edge, bool blink_on);
+void OLED_DrawCubeIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t active_edge, bool blink_on);
+void OLED_DrawTriangleIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y);
+void OLED_DrawCylinderIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t active_edge, bool blink_on);
+void OLED_DrawFullScreenBubble(OLED_HandleTypeDef *dev, float pitch_deg, float roll_deg, float angle_z, float temp_c);
+void OLED_DrawMenuModeIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t mode_idx, uint8_t color);
 
 #endif /* OLED_H */
