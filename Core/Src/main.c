@@ -416,7 +416,7 @@ int main(void)
   HAL_Delay(1500);
 
   printf("\r\n===============================================\r\n");
-  printf("  STM32G491 PROFESSIONAL MEASURE METER DEMO   \r\n");
+  printf("  STM32G491 MEASURE METER DEMO   \r\n");
   printf("===============================================\r\n");
 
   // 6. Initialize OLED Display (I2C2 on PA8/PA9)
@@ -431,7 +431,7 @@ int main(void)
           OLED_UpdateScreen(&oled_dev);
           HAL_Delay(25);
       }
-      // Phase 2: Professional Animated Digital Measuring Tape & Laser Splash Screen
+      // Phase 2: Animated Digital Measuring Tape & Laser Splash Screen
       OLED_Clear(&oled_dev);
 
       // 1. Title Banner
@@ -459,7 +459,7 @@ int main(void)
       // 4. Impact Flash & Subtitle Banner
       OLED_DrawPixel(&oled_dev, 102, 39, OLED_COLOR_WHITE);
       OLED_DrawPixel(&oled_dev, 102, 43, OLED_COLOR_WHITE);
-      OLED_DrawStringSmall(&oled_dev, 10, 53, "Measuring Tool", OLED_COLOR_WHITE);
+      OLED_DrawStringSmall(&oled_dev, 10, 53, "LOADING..." , OLED_COLOR_WHITE);
       OLED_UpdateScreen(&oled_dev);
       HAL_Delay(1200);
       boot_complete = true;
@@ -1346,34 +1346,94 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 // Read 1S battery voltage via ADC3 Channel 1 (PB1) with 16-sample averaging
+// Filtered Battery Voltage & Percentage with 32-sample trimmed mean, IIR Low-Pass Filter, and Hysteresis
+static float static_filtered_vbat = -1.0f;
+static uint8_t static_displayed_pct = 255;
+static uint32_t last_bat_sample_tick = 0;
+
 float Read_Battery_Voltage(void)
 {
-    uint32_t adc_sum = 0;
-    const uint8_t samples = 16;
+    uint32_t now = HAL_GetTick();
 
-    for (uint8_t i = 0; i < samples; i++) {
+    // Sample battery every 500ms to avoid sampling overhead on every frame
+    if (now - last_bat_sample_tick < 500 && static_filtered_vbat > 0.0f) {
+        return static_filtered_vbat;
+    }
+    last_bat_sample_tick = now;
+
+    // 1. Take 32 ADC samples
+    uint16_t samples_buf[32];
+    uint8_t count = 0;
+
+    for (uint8_t i = 0; i < 32; i++) {
         HAL_ADC_Start(&hadc3);
-        if (HAL_ADC_PollForConversion(&hadc3, 10) == HAL_OK) {
-            adc_sum += HAL_ADC_GetValue(&hadc3);
+        if (HAL_ADC_PollForConversion(&hadc3, 5) == HAL_OK) {
+            samples_buf[count++] = (uint16_t)HAL_ADC_GetValue(&hadc3);
         }
         HAL_ADC_Stop(&hadc3);
     }
 
-    float raw_avg = (float)adc_sum / (float)samples;
+    if (count == 0) return (static_filtered_vbat > 0.0f) ? static_filtered_vbat : 3.70f;
 
-    // 12-bit ADC (0..4095) with 3.30V VREF
-    // Voltage at PB1 = (raw_avg / 4095.0) * 3.30V
-    // 1:1 Resistor Divider (100k / 100k) -> V_BAT = V_ADC * 2.0
+    // 2. Selection Sort to trim top 25% and bottom 25% outlier samples (laser pulse noise)
+    for (uint8_t i = 0; i < count - 1; i++) {
+        for (uint8_t j = i + 1; j < count; j++) {
+            if (samples_buf[i] > samples_buf[j]) {
+                uint16_t tmp = samples_buf[i];
+                samples_buf[i] = samples_buf[j];
+                samples_buf[j] = tmp;
+            }
+        }
+    }
+
+    // Average middle 50% samples
+    uint8_t start_idx = count / 4;
+    uint8_t end_idx = count - start_idx;
+    uint32_t sum = 0;
+    uint8_t valid_cnt = 0;
+    for (uint8_t i = start_idx; i < end_idx; i++) {
+        sum += samples_buf[i];
+        valid_cnt++;
+    }
+
+    float raw_avg = (valid_cnt > 0) ? ((float)sum / (float)valid_cnt) : 2048.0f;
+
+    // 12-bit ADC (0..4095) with 3.30V VREF & 1:1 Resistor Divider (V_BAT = V_ADC * 2.0)
     float v_adc = (raw_avg / 4095.0f) * 3.30f;
-    return v_adc * 2.0f;
+    float v_bat_inst = v_adc * 2.0f;
+
+    // 3. Heavy IIR Low-Pass Filter (alpha = 0.08)
+    if (static_filtered_vbat < 0.0f) {
+        static_filtered_vbat = v_bat_inst; // Initial seed on boot
+    } else {
+        static_filtered_vbat = (0.08f * v_bat_inst) + (0.92f * static_filtered_vbat);
+    }
+
+    return static_filtered_vbat;
 }
 
-// Convert 1S Li-Ion / LiPo battery voltage to percentage (4.20V = 100%, 3.30V = 0%)
+// Convert 1S Li-Ion battery voltage to percentage (4.20V = 100%, 3.30V = 0%) with 1% Hysteresis
 uint8_t Calculate_Battery_Percentage(float v_bat)
 {
-    if (v_bat >= 4.20f) return 100;
-    if (v_bat <= 3.30f) return 0;
-    return (uint8_t)(((v_bat - 3.30f) / (4.20f - 3.30f)) * 100.0f);
+    uint8_t raw_pct = 0;
+    if (v_bat >= 4.20f) raw_pct = 100;
+    else if (v_bat <= 3.30f) raw_pct = 0;
+    else raw_pct = (uint8_t)(((v_bat - 3.30f) / (4.20f - 3.30f)) * 100.0f);
+
+    // Initial seed
+    if (static_displayed_pct == 255) {
+        static_displayed_pct = raw_pct;
+        return static_displayed_pct;
+    }
+
+    // 4. Hysteresis: Step smoothly by 1% to prevent rapid toggling
+    if (raw_pct > static_displayed_pct && (raw_pct - static_displayed_pct) >= 1) {
+        static_displayed_pct++;
+    } else if (raw_pct < static_displayed_pct && (static_displayed_pct - raw_pct) >= 1) {
+        static_displayed_pct--;
+    }
+
+    return static_displayed_pct;
 }
 
 // Redirect standard printf to USB CDC Transmit
