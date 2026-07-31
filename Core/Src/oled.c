@@ -178,9 +178,9 @@ void OLED_UpdateScreen(OLED_HandleTypeDef *dev)
     }
 }
 
-void OLED_DrawPixel(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t color)
+void OLED_DrawPixel(OLED_HandleTypeDef *dev, int16_t x, int16_t y, uint8_t color)
 {
-    if (x >= OLED_WIDTH || y >= OLED_HEIGHT) return;
+    if (x < 0 || x >= OLED_WIDTH || y < 0 || y >= OLED_HEIGHT) return;
 
     if (color == OLED_COLOR_WHITE) {
         dev->buffer[x + (y / 8) * OLED_WIDTH] |= (1 << (y % 8));
@@ -189,7 +189,7 @@ void OLED_DrawPixel(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t color
     }
 }
 
-void OLED_DrawLine(OLED_HandleTypeDef *dev, uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, uint8_t color)
+void OLED_DrawLine(OLED_HandleTypeDef *dev, int16_t x1, int16_t y1, int16_t x2, int16_t y2, uint8_t color)
 {
     int dx = abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
     int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
@@ -204,7 +204,7 @@ void OLED_DrawLine(OLED_HandleTypeDef *dev, uint8_t x1, uint8_t y1, uint8_t x2, 
     }
 }
 
-void OLED_DrawRect(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint8_t color)
+void OLED_DrawRect(OLED_HandleTypeDef *dev, int16_t x, int16_t y, int16_t w, int16_t h, uint8_t color)
 {
     OLED_DrawLine(dev, x, y, x + w - 1, y, color);
     OLED_DrawLine(dev, x, y + h - 1, x + w - 1, y + h - 1, color);
@@ -212,16 +212,25 @@ void OLED_DrawRect(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t w, uin
     OLED_DrawLine(dev, x + w - 1, y, x + w - 1, y + h - 1, color);
 }
 
-void OLED_FillRect(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint8_t color)
+void OLED_FillRect(OLED_HandleTypeDef *dev, int16_t x, int16_t y, int16_t w, int16_t h, uint8_t color)
 {
-    for (uint8_t i = x; i < x + w; i++) {
-        for (uint8_t j = y; j < y + h; j++) {
+    int16_t x2 = x + w;
+    int16_t y2 = y + h;
+    if (x >= OLED_WIDTH || y >= OLED_HEIGHT || x2 <= 0 || y2 <= 0) return;
+
+    int16_t x_start = (x < 0) ? 0 : x;
+    int16_t y_start = (y < 0) ? 0 : y;
+    int16_t x_end = (x2 > OLED_WIDTH) ? OLED_WIDTH : x2;
+    int16_t y_end = (y2 > OLED_HEIGHT) ? OLED_HEIGHT : y2;
+
+    for (int16_t i = x_start; i < x_end; i++) {
+        for (int16_t j = y_start; j < y_end; j++) {
             OLED_DrawPixel(dev, i, j, color);
         }
     }
 }
 
-void OLED_DrawCircle(OLED_HandleTypeDef *dev, uint8_t x0, uint8_t y0, uint8_t radius, uint8_t color)
+void OLED_DrawCircle(OLED_HandleTypeDef *dev, int16_t x0, int16_t y0, int16_t radius, uint8_t color)
 {
     int f = 1 - radius;
     int ddF_x = 1;
@@ -255,7 +264,7 @@ void OLED_DrawCircle(OLED_HandleTypeDef *dev, uint8_t x0, uint8_t y0, uint8_t ra
     }
 }
 
-void OLED_FillCircle(OLED_HandleTypeDef *dev, uint8_t x0, uint8_t y0, uint8_t radius, uint8_t color)
+void OLED_FillCircle(OLED_HandleTypeDef *dev, int16_t x0, int16_t y0, int16_t radius, uint8_t color)
 {
     for (int y = -radius; y <= radius; y++) {
         for (int x = -radius; x <= radius; x++) {
@@ -638,6 +647,90 @@ void OLED_DrawFullScreenBubble(OLED_HandleTypeDef *dev, float pitch_deg, float r
         OLED_FillCircle(dev, bx, by, 5, OLED_COLOR_WHITE); 
     } else {
         OLED_DrawCircle(dev, bx, by, 3, OLED_COLOR_WHITE); 
+    }
+}
+
+void OLED_DrawCarouselModeIcon(OLED_HandleTypeDef *dev, int16_t x, int16_t y, uint8_t mode_idx, uint8_t color)
+{
+    switch (mode_idx) {
+        case 0: // DISTANCE: Laser Meter Body + Beam
+            OLED_DrawRect(dev, x + 2, y + 3, 10, 16, color);
+            OLED_DrawCircle(dev, x + 7, y + 7, 2, color);
+            OLED_DrawLine(dev, x + 12, y + 7, x + 22, y + 7, color);
+            OLED_DrawPixel(dev, x + 24, y + 7, color);
+            break;
+
+        case 1: // LEVEL: Bubble Target
+            OLED_DrawCircle(dev, x + 11, y + 11, 9, color);
+            OLED_DrawCircle(dev, x + 11, y + 11, 2, color);
+            OLED_DrawLine(dev, x + 11, y + 1, x + 11, y + 5, color);
+            OLED_DrawLine(dev, x + 11, y + 17, x + 11, y + 21, color);
+            OLED_DrawLine(dev, x + 1, y + 11, x + 5, y + 11, color);
+            OLED_DrawLine(dev, x + 17, y + 11, x + 21, y + 11, color);
+            break;
+
+        case 2: // HEIGHT: Right Triangle
+            OLED_DrawLine(dev, x + 3, y + 2, x + 3, y + 20, color);
+            OLED_DrawLine(dev, x + 3, y + 20, x + 21, y + 20, color);
+            OLED_DrawLine(dev, x + 3, y + 2, x + 21, y + 20, color);
+            break;
+
+        case 3: // AREA: Rectangle Grid
+            OLED_DrawRect(dev, x + 2, y + 3, 20, 14, color);
+            OLED_DrawLine(dev, x + 2, y + 10, x + 21, y + 10, color);
+            OLED_DrawLine(dev, x + 12, y + 3, x + 12, y + 16, color);
+            break;
+
+        case 4: // VOLUME: 3D Isometric Cube with color parameter support
+            OLED_DrawLine(dev, x + 12, y + 20, x + 12, y + 10, color);  // Front right vertical
+            OLED_DrawLine(dev, x + 12, y + 10, x + 3,  y + 10, color);  // Front top horizontal
+            OLED_DrawLine(dev, x + 12, y + 10, x + 20, y + 3,  color);  // Top right depth
+            OLED_DrawLine(dev, x + 20, y + 13, x + 20, y + 3,  color);  // Back right vertical
+            OLED_DrawLine(dev, x + 3,  y + 10, x + 11, y + 3,  color);  // Top left depth
+            OLED_DrawLine(dev, x + 11, y + 3,  x + 20, y + 3,  color);  // Back top horizontal
+            OLED_DrawLine(dev, x + 3,  y + 20, x + 12, y + 20, color);  // Bottom-front length
+            OLED_DrawLine(dev, x + 12, y + 20, x + 20, y + 13, color);  // Bottom right depth
+            OLED_DrawLine(dev, x + 3,  y + 20, x + 3,  y + 10, color);  // Left vertical
+            break;
+
+        case 5: // CYLINDER: 3D Cylinder with color parameter support
+            // Top Ellipse
+            OLED_DrawLine(dev, x + 7,  y + 2,  x + 17, y + 2,  color);
+            OLED_DrawLine(dev, x + 7,  y + 6,  x + 17, y + 6,  color);
+            OLED_DrawLine(dev, x + 4,  y + 3,  x + 6,  y + 3,  color);
+            OLED_DrawLine(dev, x + 18, y + 3,  x + 20, y + 3,  color);
+            OLED_DrawLine(dev, x + 4,  y + 5,  x + 6,  y + 5,  color);
+            OLED_DrawLine(dev, x + 18, y + 5,  x + 20, y + 5,  color);
+            OLED_DrawPixel(dev, x + 3,  y + 4, color);
+            OLED_DrawPixel(dev, x + 21, y + 4, color);
+
+            // Bottom Ellipse (lower arc)
+            OLED_DrawLine(dev, x + 7,  y + 20, x + 17, y + 20, color);
+            OLED_DrawLine(dev, x + 4,  y + 19, x + 6,  y + 19, color);
+            OLED_DrawLine(dev, x + 18, y + 19, x + 20, y + 19, color);
+            OLED_DrawPixel(dev, x + 3,  y + 18, color);
+            OLED_DrawPixel(dev, x + 21, y + 18, color);
+
+            // Side Verticals
+            OLED_DrawLine(dev, x + 3,  y + 4,  x + 3,  y + 18, color);
+            OLED_DrawLine(dev, x + 21, y + 4,  x + 21, y + 18, color);
+            break;
+
+        case 6: // MAXMIN: Up/Down Arrows Peak Wave
+            OLED_DrawLine(dev, x + 5, y + 2, x + 5, y + 18, color);
+            OLED_DrawLine(dev, x + 2, y + 5, x + 5, y + 2, color);
+            OLED_DrawLine(dev, x + 8, y + 5, x + 5, y + 2, color);
+            OLED_DrawLine(dev, x + 17, y + 2, x + 17, y + 18, color);
+            OLED_DrawLine(dev, x + 14, y + 15, x + 17, y + 18, color);
+            OLED_DrawLine(dev, x + 20, y + 15, x + 17, y + 18, color);
+            break;
+
+        case 7: // MEMORY: Document / Log Lines
+            OLED_DrawRect(dev, x + 3, y + 2, 16, 18, color);
+            OLED_DrawLine(dev, x + 6, y + 6, x + 16, y + 6, color);
+            OLED_DrawLine(dev, x + 6, y + 10, x + 16, y + 10, color);
+            OLED_DrawLine(dev, x + 6, y + 14, x + 14, y + 14, color);
+            break;
     }
 }
 

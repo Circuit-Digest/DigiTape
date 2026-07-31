@@ -99,6 +99,7 @@ uint32_t last_short_press_tick = 0; // For global double-press detection
 
 float    laser_pitch_elev = 0.0f;   // Global Laser Pitch Elevation (-Angle X)
 float    side_roll = 0.0f;          // Global Screen Side Roll (Angle Y)
+int16_t  carousel_anim_x = 0;       // Smooth sliding animation offset for fitness band carousel menu
 
 bool     hold_active = false;
 int      hold_distance_mm = -1;
@@ -138,10 +139,8 @@ static void MX_ADC3_Init(void);
 /* USER CODE BEGIN PFP */
 float Read_Battery_Voltage(void);
 uint8_t Calculate_Battery_Percentage(float v_bat);
-static uint8_t Read_Battery_Percentage(void);
-static float Convert_Distance_Unit(float dist_cm, uint8_t unit);
-static void Format_Distance_String(float dist_cm, uint8_t unit, char *out_buf, size_t buf_len);
-static void Save_History(float val_cm, uint8_t mode, uint8_t unit);
+void Format_Distance_String(float dist_cm, uint8_t unit, char *out_str, size_t max_len);
+void Add_To_History(float dist_cm);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -197,11 +196,12 @@ void Encoder_Update(Encoder_t *e)
             if (item > 2) item = 0;
             settings_item = (uint8_t)item;
         } else if (app_state == APP_STATE_MENU) {
-            // Scroll through all 8 available modes in feature phone menu grid
+            // Scroll through all 8 available modes in fitness band carousel
             int m = (int)selected_mode + dir;
             if (m < 0) m = 7;
             if (m > 7) m = 0;
             selected_mode = (uint8_t)m;
+            carousel_anim_x = (dir > 0) ? 36 : -36;
         } else if (app_state == APP_STATE_MEASURE && selected_mode == 7) {
             // In History Memory Mode, scroll through saved records
             if (history_count > 0) {
@@ -431,14 +431,37 @@ int main(void)
           OLED_UpdateScreen(&oled_dev);
           HAL_Delay(25);
       }
-      // Phase 2: Brand reveal
+      // Phase 2: Professional Animated Digital Measuring Tape & Laser Splash Screen
       OLED_Clear(&oled_dev);
-      OLED_DrawString3x(&oled_dev, 14, 2, "DIGI", OLED_COLOR_WHITE);
-      OLED_DrawString3x(&oled_dev, 20, 34, "TAPE", OLED_COLOR_WHITE);
-    //   OLED_DrawStringSmall(&oled_dev, 28, 48, "PRO METER V2.0", OLED_COLOR_WHITE);
-    //   OLED_DrawLine(&oled_dev, 10, 57, 118, 57, OLED_COLOR_WHITE);
+
+      // 1. Title Banner
+      OLED_DrawStringLarge(&oled_dev, 10, 2, "DIGI-TAPE", OLED_COLOR_WHITE);
+
+      // 2. Digital Measuring Tape Ruler Ticks (Y: 18..28)
+      OLED_DrawRect(&oled_dev, 4, 18, 120, 10, OLED_COLOR_WHITE);
+      for (uint8_t tick_x = 8; tick_x <= 116; tick_x += 4) {
+          uint8_t tick_h = ((tick_x - 8) % 16 == 0) ? 6 : 3;
+          OLED_DrawLine(&oled_dev, tick_x, 18, tick_x, 18 + tick_h, OLED_COLOR_WHITE);
+      }
+
+      // 3. Laser Meter Body & Beam Animation (Y: 34..48)
+      OLED_DrawRect(&oled_dev, 8, 34, 18, 14, OLED_COLOR_WHITE);
+      OLED_DrawCircle(&oled_dev, 22, 41, 2, OLED_COLOR_WHITE);
+      OLED_DrawRect(&oled_dev, 104, 33, 4, 16, OLED_COLOR_WHITE); // Target Wall
+
+      for (uint8_t bx = 26; bx <= 100; bx += 6) {
+          OLED_DrawLine(&oled_dev, 26, 41, bx, 41, OLED_COLOR_WHITE);
+          OLED_DrawPixel(&oled_dev, bx + 2, 41, OLED_COLOR_WHITE);
+          OLED_UpdateScreen(&oled_dev);
+          HAL_Delay(35);
+      }
+
+      // 4. Impact Flash & Subtitle Banner
+      OLED_DrawPixel(&oled_dev, 102, 39, OLED_COLOR_WHITE);
+      OLED_DrawPixel(&oled_dev, 102, 43, OLED_COLOR_WHITE);
+      OLED_DrawStringSmall(&oled_dev, 10, 53, "Measuring Tool", OLED_COLOR_WHITE);
       OLED_UpdateScreen(&oled_dev);
-      HAL_Delay(2000);
+      HAL_Delay(1200);
       boot_complete = true;
   } else {
       printf(" -> [WARN] OLED Display Not Detected on I2C2\r\n");
@@ -462,9 +485,13 @@ int main(void)
   if (vl53_status == VL53LX_ERROR_NONE) {
       vl53_status = VL53LX_DataInit(p_vl53);
       if (vl53_status == VL53LX_ERROR_NONE) {
+          // Configure ST internal APIs for 6.0m Maximum Range & High Accuracy
+          VL53LX_SetDistanceMode(p_vl53, VL53LX_DISTANCEMODE_LONG);
+          VL53LX_SetMeasurementTimingBudgetMicroSeconds(p_vl53, 100000); // 100ms integration time
+
           vl53_status = VL53LX_StartMeasurement(p_vl53);
           if (vl53_status == VL53LX_ERROR_NONE) {
-              printf(" -> [OK] VL53L4CX Measurement Started\r\n");
+              printf(" -> [OK] VL53L4CX Measurement Started (LONG Mode, 100ms Budget, 6m Max Range)\r\n");
           } else {
               printf(" -> [ERROR] VL53LX_StartMeasurement failed: %d\r\n", vl53_status);
           }
@@ -664,43 +691,72 @@ int main(void)
             OLED_Clear(&oled_dev);
 
             if (app_state == APP_STATE_MENU) {
-                // --- FEATURE PHONE MAIN MENU SCREEN (ALL 8 MODES IN SINGLE MENU GRID) ---
+                // --- ANIMATED FITNESS BAND CAROUSEL MENU SCREEN ---
+                // Interpolate sliding animation offset toward 0
+                if (carousel_anim_x > 0) {
+                    carousel_anim_x -= 9;
+                    if (carousel_anim_x < 0) carousel_anim_x = 0;
+                } else if (carousel_anim_x < 0) {
+                    carousel_anim_x += 9;
+                    if (carousel_anim_x > 0) carousel_anim_x = 0;
+                }
+
+                // 1. Header Bar (Y: 0..11)
                 OLED_FillRect(&oled_dev, 0, 0, 128, 12, OLED_COLOR_WHITE);
-                OLED_DrawStringSmall(&oled_dev, 2, 2, "SELECT MODE", OLED_COLOR_BLACK);
+                OLED_DrawStringSmall(&oled_dev, 2, 2, "MODE CAROUSEL", OLED_COLOR_BLACK);
                 OLED_DrawBatteryIcon(&oled_dev, 110, 2, bat_pct, OLED_COLOR_BLACK);
                 char bat_txt[6];
                 snprintf(bat_txt, sizeof(bat_txt), "%d%%", bat_pct);
                 OLED_DrawStringSmall(&oled_dev, 86, 2, bat_txt, OLED_COLOR_BLACK);
 
-                // 4x2 Mode Grid (Y: 15..48) with graphical icons
-                for (uint8_t i = 0; i < 8; i++) {
-                    uint8_t row = i / 4;
-                    uint8_t col = i % 4;
-                    uint8_t x = 2 + col * 32;
-                    uint8_t y = 15 + row * 18;
+                // 2. 3D Carousel Cards (Y: 15..41)
+                uint8_t prev_m = (selected_mode + 7) % 8;
+                uint8_t next_m = (selected_mode + 1) % 8;
 
-                    if (i == selected_mode) {
-                        OLED_FillRect(&oled_dev, x, y, 30, 16, OLED_COLOR_WHITE);
-                        OLED_DrawMenuModeIcon(&oled_dev, x + 7, y + 2, i, OLED_COLOR_BLACK);
-                    } else {
-                        OLED_DrawRect(&oled_dev, x, y, 30, 16, OLED_COLOR_WHITE);
-                        OLED_DrawMenuModeIcon(&oled_dev, x + 7, y + 2, i, OLED_COLOR_WHITE);
-                    }
+                // Left Side Preview Icon (Prev)
+                int16_t prev_x = 8 + carousel_anim_x;
+                if (prev_x > -20 && prev_x < 120) {
+                    OLED_DrawRect(&oled_dev, prev_x, 18, 24, 22, OLED_COLOR_WHITE);
+                    OLED_DrawCarouselModeIcon(&oled_dev, prev_x, 17, prev_m, OLED_COLOR_WHITE);
                 }
 
-                // Bottom Title Banner (Y: 51..63)
-                OLED_DrawLine(&oled_dev, 0, 50, 127, 50, OLED_COLOR_WHITE);
+                // Right Side Preview Icon (Next)
+                int16_t next_x = 96 + carousel_anim_x;
+                if (next_x > -20 && next_x < 120) {
+                    OLED_DrawRect(&oled_dev, next_x, 18, 24, 22, OLED_COLOR_WHITE);
+                    OLED_DrawCarouselModeIcon(&oled_dev, next_x, 17, next_m, OLED_COLOR_WHITE);
+                }
+
+                // Center Focused Main Card (Selected Mode)
+                int16_t center_x = 48 + carousel_anim_x;
+                OLED_FillRect(&oled_dev, center_x, 15, 32, 26, OLED_COLOR_WHITE);
+                OLED_DrawCarouselModeIcon(&oled_dev, center_x + 2, 16, selected_mode, OLED_COLOR_BLACK);
+
+                // 3. Centered Mode Title (Y: 44..52)
                 const char *mode_titles[8] = {
-                    "> 1. DISTANCE METER",
-                    "> 2. SPIRIT LEVEL",
-                    "> 3. HEIGHT (PYTH)",
-                    "> 4. AREA CALCULATOR",
-                    "> 5. VOLUME CALCULATOR",
-                    "> 6. CYLINDER CALCULATOR",
-                    "> 7. MAX/MIN TRACKING",
-                    "> 8. MEMORY LOG"
+                    "1. DISTANCE METER",
+                    "2. SPIRIT LEVEL",
+                    "3. HEIGHT (PYTH)",
+                    "4. AREA CALCULATOR",
+                    "5. VOLUME CALCULATOR",
+                    "6. CYLINDER METER",
+                    "7. MAX/MIN TRACKING",
+                    "8. MEMORY LOG"
                 };
-                OLED_DrawStringSmall(&oled_dev, 2, 53, mode_titles[selected_mode], OLED_COLOR_WHITE);
+                uint8_t title_len = strlen(mode_titles[selected_mode]);
+                uint8_t title_x = (title_len * 6 < 126) ? ((128 - title_len * 6) / 2) : 2;
+                OLED_DrawStringSmall(&oled_dev, title_x, 44, mode_titles[selected_mode], OLED_COLOR_WHITE);
+
+                // 4. Fitness Band Carousel Pager Dots (Y: 57..62)
+                uint8_t start_dots_x = (128 - (8 * 8 - 4)) / 2; // Center 8 dots
+                for (uint8_t i = 0; i < 8; i++) {
+                    uint8_t dot_x = start_dots_x + i * 8;
+                    if (i == selected_mode) {
+                        OLED_FillRect(&oled_dev, dot_x, 57, 5, 5, OLED_COLOR_WHITE); // Active dot
+                    } else {
+                        OLED_DrawPixel(&oled_dev, dot_x + 2, 59, OLED_COLOR_WHITE); // Inactive dot
+                    }
+                }
             } else if (app_state == APP_STATE_SETTINGS || in_settings) {
                 // --- FULL SCREEN SETTINGS OVERLAY ---
                 OLED_FillRect(&oled_dev, 0, 0, 128, 12, OLED_COLOR_WHITE);
@@ -756,8 +812,8 @@ int main(void)
                     OLED_DrawLine(&oled_dev, 0, 12, 127, 12, OLED_COLOR_WHITE);
 
                     char prim_str[16];
-                    char sec1[32] = {0};
-                    char sec2[32] = {0};
+                    char sec1[48] = {0};
+                    char sec2[48] = {0};
 
                     if (active_mode == 0) {
                         // Draw visual horizontal (side roll) & vertical (pitch elevation) leveling bars

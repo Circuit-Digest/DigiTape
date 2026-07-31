@@ -22,12 +22,12 @@ typedef struct {
 bool OLED_Init(OLED_HandleTypeDef *dev, I2C_HandleTypeDef *hi2c);
 void OLED_Clear(OLED_HandleTypeDef *dev);
 void OLED_UpdateScreen(OLED_HandleTypeDef *dev);
-void OLED_DrawPixel(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t color);
-void OLED_DrawLine(OLED_HandleTypeDef *dev, uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, uint8_t color);
-void OLED_DrawRect(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint8_t color);
-void OLED_FillRect(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint8_t color);
-void OLED_DrawCircle(OLED_HandleTypeDef *dev, uint8_t x0, uint8_t y0, uint8_t radius, uint8_t color);
-void OLED_FillCircle(OLED_HandleTypeDef *dev, uint8_t x0, uint8_t y0, uint8_t radius, uint8_t color);
+void OLED_DrawPixel(OLED_HandleTypeDef *dev, int16_t x, int16_t y, uint8_t color);
+void OLED_DrawLine(OLED_HandleTypeDef *dev, int16_t x1, int16_t y1, int16_t x2, int16_t y2, uint8_t color);
+void OLED_DrawRect(OLED_HandleTypeDef *dev, int16_t x, int16_t y, int16_t w, int16_t h, uint8_t color);
+void OLED_FillRect(OLED_HandleTypeDef *dev, int16_t x, int16_t y, int16_t w, int16_t h, uint8_t color);
+void OLED_DrawCircle(OLED_HandleTypeDef *dev, int16_t x0, int16_t y0, int16_t radius, uint8_t color);
+void OLED_FillCircle(OLED_HandleTypeDef *dev, int16_t x0, int16_t y0, int16_t radius, uint8_t color);
 
 void OLED_DrawStringSmall(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, const char *str, uint8_t color);
 void OLED_DrawStringLarge(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, const char *str, uint8_t color);
@@ -49,5 +49,6 @@ void OLED_DrawMenuModeIcon(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, uint8_
 void OLED_DrawLevelBars(OLED_HandleTypeDef *dev, float pitch_elev_deg, float roll_deg);
 void OLED_Draw7SegmentDigit(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, char c, uint8_t w, uint8_t h, uint8_t t, uint8_t color);
 void OLED_Draw7SegmentString(OLED_HandleTypeDef *dev, uint8_t x, uint8_t y, const char *str, uint8_t w, uint8_t h, uint8_t t, uint8_t color);
+void OLED_DrawCarouselModeIcon(OLED_HandleTypeDef *dev, int16_t x, int16_t y, uint8_t mode_idx, uint8_t color);
 
 #endif /* OLED_H */
