@@ -1,22 +1,27 @@
-/* USER CODE BEGIN Header */
+/*
+ * main.c
+ * Main firmware implementation for Digi-Tape Tool
+ *
+ * Copyright (c) 2026 Dharagesh and Circuit Digest
+ * https://github.com/Circuit-Digest/Digi-Tape-Tool
+ * Licensed under GNU General Public License v3.0
+ */
+
+/*
+  ██████╗  ██████╗  ██████╗ ██████╗     ████████╗██████╗ ██████╗ ███████╗
+  ██╔══██╗   ██║   ██╔════╝   ██║       ╚══██╔══╝██╔══██╗██╔══██╗██╔════╝
+  ██║  ██║   ██║   ██║  ███╗  ██║          ██║   ███████║██████╔╝█████╗  
+  ██║  ██║   ██║   ██║   ██║  ██║          ██║   ██╔══██║██╔═══╝ ██╔══╝  
+  ██████╔╝ ██████╗ ╚██████╔╝██████╗        ██║   ██║  ██║██║     ███████╗
+  ╚═════╝  ╚═════╝  ╚═════╝ ╚═════╝        ╚═╝   ╚═╝  ╚═╝╚═╝     ╚══════╝
+*/
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body - Commercial Grade Digital Measurement Device
+  * @brief          : Main program body - Digital Measurement Device
   *                   Modes: DIST, LEVEL, HEIGHT, AREA, VOLUME, CYLINDER, MAX/MIN, MEMORY
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
-/* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "usb_device.h"
@@ -291,6 +296,7 @@ void Encoder_Update(Encoder_t *e)
         if (device_sleeping) {
             device_sleeping = false;
             OLED_DisplayOn(&oled_dev);
+            HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET); // Hardware XSHUT Power ON (PC11)
             if (p_vl53) VL53LX_StartMeasurement(p_vl53);
             printf(" -> [WAKEUP] Encoder Interaction! Display & ToF Active.\r\n");
         }
@@ -343,6 +349,46 @@ int Filter_ToF_Distance_MM(int raw_mm)
     }
 
     return (int)(filtered_tof_mm + 0.5f);
+}
+
+// --- ST Multi-Target Histogram & Signal Quality Evaluator ---
+float live_signal_mcps  = 0.0f;
+float live_ambient_mcps = 0.0f;
+
+int Process_ST_MultiTarget_Ranging(VL53LX_MultiRangingData_t *p_data)
+{
+    if (!p_data || p_data->NumberOfObjectsFound == 0) return -1;
+
+    int best_mm = -1;
+    float max_signal = -1.0f;
+
+    for (uint8_t i = 0; i < p_data->NumberOfObjectsFound; i++) {
+        VL53LX_TargetRangeData_t *target = &p_data->RangeData[i];
+        
+        // Convert ST 16.16 fixed-point Mcps to float
+        float sig_mcps = (float)target->SignalRateRtnMegaCps / 65536.0f;
+        float amb_mcps = (float)target->AmbientRateRtnMegaCps / 65536.0f;
+
+        if (i == 0) {
+            live_signal_mcps  = sig_mcps;
+            live_ambient_mcps = amb_mcps;
+        }
+
+        // Accept target if RangeStatus is 0 (Valid target return)
+        if (target->RangeStatus == 0 && target->RangeMilliMeter > 10) {
+            if (sig_mcps > max_signal) {
+                max_signal = sig_mcps;
+                best_mm    = target->RangeMilliMeter;
+            }
+        }
+    }
+
+    // Fallback: If no RangeStatus==0 target was found, use RangeData[0]
+    if (best_mm < 0 && p_data->RangeData[0].RangeMilliMeter > 10) {
+        best_mm = p_data->RangeData[0].RangeMilliMeter;
+    }
+
+    return best_mm;
 }
 
 float Calculate_Net_Distance_CM(int raw_mm, float pitch_elev_deg)
@@ -583,13 +629,14 @@ int main(void)
   if (vl53_status == VL53LX_ERROR_NONE) {
       vl53_status = VL53LX_DataInit(p_vl53);
       if (vl53_status == VL53LX_ERROR_NONE) {
-          // Configure ST internal APIs for 6.0m Maximum Range & High Accuracy
+          // Configure ST internal APIs for 6.0m Maximum Range, High Accuracy & Crosstalk Cancellation
           VL53LX_SetDistanceMode(p_vl53, VL53LX_DISTANCEMODE_LONG);
           VL53LX_SetMeasurementTimingBudgetMicroSeconds(p_vl53, 200000); // 200ms integration time for max long-range sensitivity
+          VL53LX_SetXTalkCompensationEnable(p_vl53, 1);                  // Enable Cover Glass Crosstalk Cancellation!
 
           vl53_status = VL53LX_StartMeasurement(p_vl53);
           if (vl53_status == VL53LX_ERROR_NONE) {
-              printf(" -> [OK] VL53L4CX Measurement Started (LONG Mode, 200ms Budget, 6m Max Range)\r\n");
+              printf(" -> [OK] VL53L4CX Active (LONG Mode, 200ms Budget, Crosstalk Comp ENABLED, 6m Max Range)\r\n");
           } else {
               printf(" -> [ERROR] VL53LX_StartMeasurement failed: %d\r\n", vl53_status);
           }
@@ -656,9 +703,9 @@ int main(void)
             if (VL53LX_GetMeasurementDataReady(p_vl53, &vl53_ready) == VL53LX_ERROR_NONE && vl53_ready != 0) {
                 if (VL53LX_GetMultiRangingData(p_vl53, &ranging_data) == VL53LX_ERROR_NONE) {
                     num_objects = ranging_data.NumberOfObjectsFound;
-                    if (num_objects > 0 && ranging_data.RangeData[0].RangeStatus == 0) {
-                        int raw_inst_mm = ranging_data.RangeData[0].RangeMilliMeter;
-                        live_raw_mm = Filter_ToF_Distance_MM(raw_inst_mm);
+                    int target_mm = Process_ST_MultiTarget_Ranging(&ranging_data);
+                    if (target_mm > 0) {
+                        live_raw_mm = Filter_ToF_Distance_MM(target_mm);
                         if (app_state == APP_STATE_MEASURE && !hold_active) {
                             last_activity_tick = now; // Active ranging continuously resets sleep timer!
                         }
@@ -813,20 +860,22 @@ int main(void)
                 if (device_sleeping) {
                     device_sleeping = false;
                     OLED_DisplayOn(&oled_dev);
+                    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET); // Hardware XSHUT Power ON (PC11)
                     if (p_vl53) VL53LX_StartMeasurement(p_vl53);
                     printf(" -> [WAKEUP] Motion Pick-up (Delta G: %.3fg)! Display & ToF Active.\r\n", delta_acc);
                 }
             }
         }
 
-        // --- 5. Inactivity Timeout Check (60 Seconds Auto-Sleep) ---
+        // --- 5. Inactivity Timeout Check (3 Minutes Auto-Sleep) ---
         if (!device_sleeping && (now - last_activity_tick >= AUTO_SLEEP_TIMEOUT_MS)) {
             device_sleeping = true;
             laser_active = false;
-            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET); // Laser OFF
-            if (p_vl53) VL53LX_StopMeasurement(p_vl53);           // ToF Low-Power Sleep
-            OLED_DisplayOff(&oled_dev);                          // OLED Sleep (Display OFF)
-            printf(" -> [AUTO-SLEEP] 60s Inactivity. Low-Power Sleep Active.\r\n");
+            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);  // Laser OFF
+            if (p_vl53) VL53LX_StopMeasurement(p_vl53);            // ToF Low-Power Sleep
+            HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET); // Hardware XSHUT Zero-Current Shutdown (PC11)
+            OLED_DisplayOff(&oled_dev);                           // OLED Sleep (Display OFF)
+            printf(" -> [AUTO-SLEEP] 3-Min Inactivity. Low-Power Hardware Sleep Active.\r\n");
         }
 
         // Sleep Idle Loop when sleeping to conserve maximum battery power
