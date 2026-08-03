@@ -1,0 +1,4 @@
+Layer Pairs Export File for PCB: C:\Users\sdham\Documents\Work_Semicon\Digital_Tape\Digital_Tape\DigiTape.PcbDoc
+LayersSetName=Top_Bot_Thru_Holes|DrillFile=digitape-roundholes.txt|DrillLayers=gtl,gbl
+LayersSetName=Top_Bot_Slot_Holes|DrillFile=digitape-slotholes.txt|DrillLayers=gtl,gbl
+LayersSetName=Top_Bot_Rect_Holes|DrillFile=digitape-rectholes.txt|DrillLayers=gtl,gbl

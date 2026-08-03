@@ -1,4 +1,4 @@
-# 📏 DigiTape - Digital Measuring Tool
+# DigiTape - Digital Measuring Tool
 
 ```
   ██████╗  ██████╗  ██████╗ ██████╗     ████████╗██████╗ ██████╗ ███████╗
@@ -19,40 +19,30 @@ A pocket-size multi-mode digital laser measuring tape device built around the **
 
 ---
 
-## 🌟 Key Features
+## Key Features
 
 * **8 Comprehensive Operating Modes**:
-  1. 📏 **Distance Meter (`DIST`)**: Real-time continuous ToF distance measurement (up to 6.0 meters / 600 cm) with live roll & pitch level alignment bars.
-  2. 🎯 **Spirit Level (`LEVEL`)**: 2D digital bubble level + 3D pitch/roll angle readout ($0.01^\circ$ resolution) and temperature display.
-  3. 📐 **Height Meter (`HEIGHT`)**: Pythagoras indirect height measurement with automatic ToF vertical mounting offset & 2-point empirical tilt calibration.
-  4. 🔲 **Area Calculator (`AREA`)**: 2-shot interactive room area calculation ($L \times W \implies \text{cm}^2 / \text{m}^2$).
-  5. 📦 **Volume Calculator (`VOLUME`)**: 3-shot 3D space volume calculation ($L \times W \times H \implies \text{cm}^3 / \text{m}^3$).
-  6. 🛢️ **Cylinder Meter (`CYLINDER`)**: Pipe and tank volume calculation ($\pi \cdot R^2 \cdot H$).
-  7. 📈 **Max / Min Tracker (`MAXMIN`)**: Dynamic real-time minimum and maximum distance boundary tracker.
-  8. 💾 **Memory Log (`MEMORY`)**: Persistent 10-slot measurement record buffer.
+  1. **Distance Meter (`DIST`)**: Real-time continuous ToF distance measurement (up to 6.0 meters / 600 cm) with live roll & pitch level alignment bars.
+  2. **Spirit Level (`LEVEL`)**: 2D digital bubble level + 3D pitch/roll angle readout ($0.01^\circ$ resolution) and temperature display.
+  3. **Height Meter (`HEIGHT`)**: Pythagoras indirect height measurement with automatic ToF vertical mounting offset & 2-point empirical tilt calibration.
+  4. **Area Calculator (`AREA`)**: 2-shot interactive room area calculation ($L \times W \implies \text{cm}^2 / \text{m}^2$).
+  5. **Volume Calculator (`VOLUME`)**: 3-shot 3D space volume calculation ($L \times W \times H \implies \text{cm}^3 / \text{m}^3$).
+  6. **Cylinder Meter (`CYLINDER`)**: Pipe and tank volume calculation ($\pi \cdot R^2 \cdot H$).
+  7. **Max / Min Tracker (`MAXMIN`)**: Dynamic real-time minimum and maximum distance boundary tracker.
+  8. **Memory Log (`MEMORY`)**: Persistent 10-slot measurement record buffer.
 
 * **ST VL53L4CX Ranging Optimization**:
   - **Multi-Target Histogram Ranging**: Penetrates transparent glass windows and filters out foreground obstacles to lock onto background target walls.
   - **Cover Glass Crosstalk Cancellation**: Cancels internal VCSEL reflections inside protective enclosure windows.
-  - **200ms Integration Timing Budget**: Maximum photon sensitivity for 6m long-range accuracy.
-
-* **3-Tier Distance-Adaptive Digital Filter**:
-  - 7-Sample Windowed Moving Median (discards single-frame noise spikes).
-  - Distance-Adaptive EMA Low-Pass Filter ($\alpha = 0.60$ at short range for zero lag; $\alpha = 0.17$ at 6m for rock-solid 1mm precision).
-
-* **Settings & NVM Flash Storage (Page 255 @ `0x0807F800`)**:
-  - Fine-tune Rear Offset in **0.1 cm (1 mm) steps**.
-  - Parameter Item Edit Mode with Encoder Knob value scrolling.
-  - Automatic Non-Volatile Flash Persistence across power cycles (`unit_mode`, `datum_mode`, `rear_offset_cm`).
 
 * **Power Management & Dual Auto-Wakeup**:
-  - Hardware `XSHUT` zero-current shutdown (`GPIOC Pin 11`) + Laser Driver control (`GPIOA Pin 4`).
+  - Hardware `XSHUT` zero-current shutdown.
   - 3-Minute Inactivity Auto-Sleep.
   - SCL3300 Motion Pick-up ($\Delta G > 0.03g$) & Encoder Turn/Press instant auto-wakeup.
 
 ---
 
-## 🎮 User Controls & Navigation Guide
+## User Controls & Navigation Guide
 
 ### 1. Hardware Controls Overview
 - **Rotary Encoder Knob (Hongyan RS11)**: Spring-return $\pm 15^\circ$ rotation knob (flicks CW / CCW and snaps back to center).
@@ -102,7 +92,7 @@ A pocket-size multi-mode digital laser measuring tape device built around the **
 
 ---
 
-## 🔌 Hardware Pinout Mapping
+## Hardware Pinout Mapping
 
 | Component | Signal | STM32G4 Pin | Description |
 | :--- | :--- | :--- | :--- |
@@ -125,7 +115,7 @@ A pocket-size multi-mode digital laser measuring tape device built around the **
 
 ---
 
-## 🛠️ Software & Driver Architecture
+## Software & Driver Architecture
 
 - **Toolchain**: STM32CubeIDE (GCC ARM Embedded Toolchain).
 - **HAL Drivers**: STM32G4 HAL Driver Package + ST VL53L4CX Ultra-Lite Driver (ULD).
@@ -135,8 +125,3 @@ A pocket-size multi-mode digital laser measuring tape device built around the **
   - `Core/Src/scl3300.c`: SPI driver and angle/acceleration conversion for Murata SCL3300.
 
 ---
-
-## 📄 License & Attribution
-
-Copyright (c) 2026 Dharagesh and Circuit Digest.  
-Licensed under the **GNU General Public License v3.0**. See `LICENSE` for details.
