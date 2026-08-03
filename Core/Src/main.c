@@ -698,11 +698,9 @@ int main(void)
 
         // --- Read Live Ranging Distance ---
         int live_raw_mm = -1;
-        uint8_t num_objects = 0;
         if (vl53_status == VL53LX_ERROR_NONE) {
             if (VL53LX_GetMeasurementDataReady(p_vl53, &vl53_ready) == VL53LX_ERROR_NONE && vl53_ready != 0) {
                 if (VL53LX_GetMultiRangingData(p_vl53, &ranging_data) == VL53LX_ERROR_NONE) {
-                    num_objects = ranging_data.NumberOfObjectsFound;
                     int target_mm = Process_ST_MultiTarget_Ranging(&ranging_data);
                     if (target_mm > 0) {
                         live_raw_mm = Filter_ToF_Distance_MM(target_mm);
