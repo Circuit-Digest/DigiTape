@@ -60,6 +60,9 @@ typedef enum {
 #define DEG_TO_RAD(deg) ((deg) * 0.017453292519943295f)
 #define M_PI_F 3.14159265358979323846f
 #define DOUBLE_PRESS_WINDOW_MS 400
+#define TOF_VERTICAL_OFFSET_CM 2.4f // 1.8cm optical center + 0.6cm enclosure base = 2.4cm total vertical mounting offset
+#define HEIGHT_GAIN_SCALE      1.0989f // 2-point empirical calibration slope gain
+#define HEIGHT_BIAS_OFFSET     +2.242f // +4.0cm offset shift correction (36.0cm -> 40.0cm exact match)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -89,11 +92,12 @@ Encoder_t             encoder = {0};
 uint8_t  selected_mode = 0;       // Highlighted item in 4x2 Menu Grid (0..7)
 AppState_t app_state = APP_STATE_MENU; // Global app state
 bool     in_settings = false;     // Full-screen Settings overlay active
+bool     in_settings_edit = false;// Settings Parameter Value Edit Mode active
 uint8_t  settings_item = 0;       // 0: Unit, 1: Datum, 2: Rear Offset
 
 uint8_t  unit_mode = 0;           // 0: CM, 1: MM, 2: M, 3: INCH
 uint8_t  datum_mode = 0;          // 0: REAR (bottom), 1: FRONT (top)
-float    rear_offset_cm = 5.5f;   // 5.5 cm device body length offset when REAR datum selected
+float    rear_offset_cm = 6.6f;   // 6.6 cm device body length offset when REAR datum selected
 
 bool     laser_active = false;
 uint32_t last_short_press_tick = 0; // For global double-press detection
@@ -103,7 +107,7 @@ float    side_roll = 0.0f;          // Global Screen Side Roll (Angle Y)
 int16_t  carousel_anim_x = 0;       // Smooth sliding animation offset for fitness band carousel menu
 
 // Auto Sleep & Motion Wakeup Control
-#define AUTO_SLEEP_TIMEOUT_MS  60000UL // 60 Seconds Inactivity Timeout
+#define AUTO_SLEEP_TIMEOUT_MS  180000UL // 3 Minutes (180 Seconds) Inactivity Timeout
 bool     device_sleeping = false;
 uint32_t last_activity_tick = 0;
 float    prev_acc_x = 0.0f;
@@ -151,6 +155,8 @@ float Read_Battery_Voltage(void);
 uint8_t Calculate_Battery_Percentage(float v_bat);
 void Format_Distance_String(float dist_cm, uint8_t unit, char *out_str, size_t max_len);
 void Add_To_History(float dist_cm);
+void Save_Settings_To_Flash(void);
+void Load_Settings_From_Flash(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -208,11 +214,27 @@ void Encoder_Update(Encoder_t *e)
             e->counter += dir;
 
             if (app_state == APP_STATE_SETTINGS || in_settings) {
-                // Scroll through 3 Settings Items (0: Unit, 1: Datum, 2: Rear Offset)
-                int item = (int)settings_item + dir;
-                if (item < 0) item = 2;
-                if (item > 2) item = 0;
-                settings_item = (uint8_t)item;
+                if (in_settings_edit) {
+                    // ITEM EDIT MODE: Turning Encoder Changes Selected Parameter Value
+                    if (settings_item == 0) { // UNIT MODE (0: CM, 1: MM, 2: M, 3: INCH)
+                        int u = (int)unit_mode + dir;
+                        if (u < 0) u = 3;
+                        if (u > 3) u = 0;
+                        unit_mode = (uint8_t)u;
+                    } else if (settings_item == 1) { // DATUM MODE (0: REAR, 1: FRONT)
+                        datum_mode = (datum_mode == 0) ? 1 : 0;
+                    } else if (settings_item == 2) { // REAR OFFSET (0.0cm .. 20.0cm in 0.1cm steps)
+                        rear_offset_cm += (dir > 0) ? 0.1f : -0.1f;
+                        if (rear_offset_cm < -0.01f) rear_offset_cm = 20.0f;
+                        if (rear_offset_cm > 20.01f) rear_offset_cm = 0.0f;
+                    }
+                } else {
+                    // MENU NAVIGATION MODE: Scroll through 3 Settings Items (0: Unit, 1: Datum, 2: Rear Offset)
+                    int item = (int)settings_item + dir;
+                    if (item < 0) item = 2;
+                    if (item > 2) item = 0;
+                    settings_item = (uint8_t)item;
+                }
             } else if (app_state == APP_STATE_MENU) {
                 // Scroll through all 8 available modes in fitness band carousel
                 int m = (int)selected_mode + dir;
@@ -264,7 +286,7 @@ void Encoder_Update(Encoder_t *e)
 
     e->prev_sw = curr_sw;
 
-    if (dir != 0 || e->short_press || e->long_press) {
+    if (dir != 0 || e->short_press || e->long_press || curr_sw == GPIO_PIN_RESET) {
         last_activity_tick = now;
         if (device_sleeping) {
             device_sleeping = false;
@@ -578,6 +600,10 @@ int main(void)
       printf(" -> [ERROR] VL53LX_WaitDeviceBooted failed: %d\r\n", vl53_status);
   }
 
+  // 9. Load Non-Volatile User Settings (Unit, Datum, Rear Offset) from STM32 Flash Page 255
+  Load_Settings_From_Flash();
+  last_activity_tick = HAL_GetTick();
+
   printf("===============================================\r\n");
   printf(" System Ready! Rotate Encoder / Press Button... \r\n");
   printf("===============================================\r\n\r\n");
@@ -633,6 +659,9 @@ int main(void)
                     if (num_objects > 0 && ranging_data.RangeData[0].RangeStatus == 0) {
                         int raw_inst_mm = ranging_data.RangeData[0].RangeMilliMeter;
                         live_raw_mm = Filter_ToF_Distance_MM(raw_inst_mm);
+                        if (app_state == APP_STATE_MEASURE && !hold_active) {
+                            last_activity_tick = now; // Active ranging continuously resets sleep timer!
+                        }
                     }
                     VL53LX_ClearInterruptAndStartMeasurement(p_vl53);
                 }
@@ -667,13 +696,22 @@ int main(void)
             encoder.short_press = false;
 
             if (HAL_GetTick() - last_short_press_tick < DOUBLE_PRESS_WINDOW_MS) {
-                // --- DOUBLE PRESS: GLOBAL BACK TO MAIN MENU SCREEN ---
+                // --- DOUBLE PRESS ---
                 last_short_press_tick = 0;
-                app_state = APP_STATE_MENU;
-                in_settings = false;
-                hold_active = false;
-                Reset_Multi_Shot();
-                printf("\r\n>>> [DOUBLE PRESS: GO BACK TO MAIN MENU] <<<\r\n\r\n");
+                if (in_settings_edit) {
+                    // Double press in Edit Mode: Confirm value, save to Flash, and exit Edit Mode back to Settings menu
+                    in_settings_edit = false;
+                    Save_Settings_To_Flash();
+                    printf("\r\n>>> [DOUBLE PRESS] Confirmed & Exited Edit Mode to Settings Menu <<<\r\n\r\n");
+                } else {
+                    // Double press in Settings / Measure Mode: Return to Main Menu
+                    app_state = APP_STATE_MENU;
+                    in_settings = false;
+                    in_settings_edit = false;
+                    hold_active = false;
+                    Reset_Multi_Shot();
+                    printf("\r\n>>> [DOUBLE PRESS: GO BACK TO MAIN MENU] <<<\r\n\r\n");
+                }
             } else {
                 last_short_press_tick = HAL_GetTick();
 
@@ -684,17 +722,17 @@ int main(void)
                     Reset_Multi_Shot();
                     printf("\r\n>>> [SINGLE PRESS] Confirmed & Entered Mode %u <<<\r\n\r\n", selected_mode);
                 } else if (app_state == APP_STATE_SETTINGS || in_settings) {
-                    // Toggle Settings Values
-                    if (settings_item == 0) { // Unit
-                        unit_mode = (unit_mode + 1) % 4;
-                    } else if (settings_item == 1) { // Datum
-                        datum_mode = (datum_mode + 1) % 2;
-                    } else if (settings_item == 2) { // Rear Offset Adjust
-                        rear_offset_cm += 1.0f;
-                        if (rear_offset_cm > 20.0f) rear_offset_cm = 0.0f;
+                    if (!in_settings_edit) {
+                        // Click on parameter item -> Enter EDIT MODE!
+                        in_settings_edit = true;
+                        printf("\r\n>>> [SETTINGS] Entered EDIT MODE for Item %u <<<\r\n\r\n", settings_item);
+                    } else {
+                        // Click while in EDIT MODE -> Confirm value, Save to Flash, & exit EDIT MODE!
+                        in_settings_edit = false;
+                        Save_Settings_To_Flash(); // Save settings immediately to NVM Flash Page 255
+                        printf("\r\n>>> [SETTINGS] Confirmed & Saved Item %u (Unit:%u | Datum:%u | Offset:%.1fcm) <<<\r\n\r\n",
+                               settings_item, unit_mode, datum_mode, rear_offset_cm);
                     }
-                    printf("\r\n>>> [SETTINGS TOGGLE] Unit: %u | Datum: %u | Offset: %.1fcm <<<\r\n\r\n",
-                           unit_mode, datum_mode, rear_offset_cm);
                 } else if (app_state == APP_STATE_MEASURE) {
                     if (selected_mode == 0 || selected_mode == 2) { // DIST or HEIGHT
                         hold_active = !hold_active;
@@ -770,7 +808,7 @@ int main(void)
             prev_acc_y = scl_dev.acc_y_g;
             prev_acc_z = scl_dev.acc_z_g;
 
-            if (delta_acc > 0.08f) { // User moved or picked up tool!
+            if (delta_acc > 0.03f) { // Sensitive movement detection resets activity timer
                 last_activity_tick = now;
                 if (device_sleeping) {
                     device_sleeping = false;
@@ -884,13 +922,15 @@ int main(void)
             } else if (app_state == APP_STATE_SETTINGS || in_settings) {
                 // --- FULL SCREEN SETTINGS OVERLAY ---
                 OLED_FillRect(&oled_dev, 0, 0, 128, 12, OLED_COLOR_WHITE);
-                OLED_DrawStringSmall(&oled_dev, 2, 2, "SETTINGS", OLED_COLOR_BLACK);
+                if (in_settings_edit) {
+                    OLED_DrawStringSmall(&oled_dev, 2, 2, "SETTINGS [EDIT]", OLED_COLOR_BLACK);
+                } else {
+                    OLED_DrawStringSmall(&oled_dev, 2, 2, "SETTINGS", OLED_COLOR_BLACK);
+                }
                 OLED_DrawLine(&oled_dev, 0, 12, 127, 12, OLED_COLOR_WHITE);
 
                 const char *unit_names[] = {"CM", "MM", "M", "INCH"};
                 const char *datum_names[] = {"REAR", "FRONT"};
-                char offset_str[12];
-                snprintf(offset_str, sizeof(offset_str), "%.1f cm", rear_offset_cm);
 
                 for (int i = 0; i < 3; i++) {
                     int row_y = 16 + i * 16;
@@ -899,18 +939,39 @@ int main(void)
                     }
                     uint8_t color = (i == settings_item) ? OLED_COLOR_BLACK : OLED_COLOR_WHITE;
                     
+                    char val_str[16];
+                    if (i == 0) {
+                        if (i == settings_item && in_settings_edit) {
+                            snprintf(val_str, sizeof(val_str), "< %s >", unit_names[unit_mode]);
+                        } else {
+                            snprintf(val_str, sizeof(val_str), "%s", unit_names[unit_mode]);
+                        }
+                    } else if (i == 1) {
+                        if (i == settings_item && in_settings_edit) {
+                            snprintf(val_str, sizeof(val_str), "< %s >", datum_names[datum_mode]);
+                        } else {
+                            snprintf(val_str, sizeof(val_str), "%s", datum_names[datum_mode]);
+                        }
+                    } else if (i == 2) {
+                        if (i == settings_item && in_settings_edit) {
+                            snprintf(val_str, sizeof(val_str), "<%.1fcm>", rear_offset_cm);
+                        } else {
+                            snprintf(val_str, sizeof(val_str), "%.1fcm", rear_offset_cm);
+                        }
+                    }
+
                     switch (i) {
                         case 0:
                             OLED_DrawStringSmall(&oled_dev, 4, row_y + 3, "UNIT", color);
-                            OLED_DrawStringSmall(&oled_dev, 80, row_y + 3, unit_names[unit_mode], color);
+                            OLED_DrawStringSmall(&oled_dev, 66, row_y + 3, val_str, color);
                             break;
                         case 1:
                             OLED_DrawStringSmall(&oled_dev, 4, row_y + 3, "DATUM", color);
-                            OLED_DrawStringSmall(&oled_dev, 80, row_y + 3, datum_names[datum_mode], color);
+                            OLED_DrawStringSmall(&oled_dev, 66, row_y + 3, val_str, color);
                             break;
                         case 2:
                             OLED_DrawStringSmall(&oled_dev, 4, row_y + 3, "OFFSET", color);
-                            OLED_DrawStringSmall(&oled_dev, 80, row_y + 3, offset_str, color);
+                            OLED_DrawStringSmall(&oled_dev, 66, row_y + 3, val_str, color);
                             break;
                     }
                 }
@@ -944,18 +1005,19 @@ int main(void)
                         OLED_DrawLevelBars(&oled_dev, laser_pitch_elev, side_roll);
                         Format_Distance_String(active_net_cm, unit_mode, prim_str, sizeof(prim_str));
                     } else if (active_mode == 2) {
-                        // HEIGHT Mode (Pythagoras indirect height measurement with 1.8cm ToF vertical mounting offset compensation)
+                        // HEIGHT Mode (Pythagoras indirect height measurement with 2-point empirical linear calibration)
                         float active_pitch = hold_active ? hold_pitch_elev : laser_pitch_elev;
                         float rad = DEG_TO_RAD(active_pitch);
                         float indirect_height_cm = 0.0f;
                         if (active_net_cm >= 0.0f) {
                             float raw_h = active_net_cm * sinf(rad);
                             if (datum_mode == 0) { // REAR Datum (device base resting on reference surface)
-                                // Subtract ToF 1.5cm vertical mounting offset to align height with device base
-                                indirect_height_cm = raw_h - 1.5f * cosf(rad);
+                                float uncal_h = raw_h - TOF_VERTICAL_OFFSET_CM * cosf(rad);
+                                indirect_height_cm = (uncal_h * HEIGHT_GAIN_SCALE) + HEIGHT_BIAS_OFFSET;
                                 if (indirect_height_cm < 0.0f) indirect_height_cm = 0.0f;
                             } else { // FRONT Datum
-                                indirect_height_cm = (raw_h >= 0.0f) ? raw_h : 0.0f;
+                                indirect_height_cm = (raw_h * HEIGHT_GAIN_SCALE) + HEIGHT_BIAS_OFFSET;
+                                if (indirect_height_cm < 0.0f) indirect_height_cm = 0.0f;
                             }
                         }
                         char hyp_str[16];
@@ -1566,6 +1628,67 @@ int _write(int file, char *ptr, int len)
 {
     CDC_Transmit_FS((uint8_t*)ptr, len);
     return len;
+}
+
+// --- STM32G4 Flash Settings Persistence (Page 255 @ 0x0807F800) ---
+#define SETTINGS_FLASH_ADDR   0x0807F800UL
+#define SETTINGS_MAGIC        0x55AA1234UL
+
+void Save_Settings_To_Flash(void)
+{
+    HAL_FLASH_Unlock();
+
+    // Erase Flash Page 255
+    FLASH_EraseInitTypeDef erase_init;
+    uint32_t page_error = 0;
+    erase_init.TypeErase = FLASH_TYPEERASE_PAGES;
+    erase_init.Banks     = FLASH_BANK_1;
+    erase_init.Page      = 255;
+    erase_init.NbPages   = 1;
+
+    if (HAL_FLASHEx_Erase(&erase_init, &page_error) == HAL_OK) {
+        // DoubleWord 1: Magic (32 bits) | Unit (8 bits) | Datum (8 bits)
+        uint64_t dw1 = ((uint64_t)SETTINGS_MAGIC) | 
+                       ((uint64_t)unit_mode << 32) | 
+                       ((uint64_t)datum_mode << 40);
+
+        // DoubleWord 2: float rear_offset_cm bitwise cast to uint32_t
+        uint32_t offset_bits = 0;
+        memcpy(&offset_bits, &rear_offset_cm, sizeof(float));
+        uint64_t dw2 = ((uint64_t)offset_bits) | ((uint64_t)(unit_mode ^ datum_mode ^ 0xA5) << 32);
+
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, SETTINGS_FLASH_ADDR, dw1);
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, SETTINGS_FLASH_ADDR + 8, dw2);
+        printf("\r\n>>> [NVM FLASH] Settings Saved! Unit:%u, Datum:%u, Offset:%.1fcm <<<\r\n\r\n",
+               unit_mode, datum_mode, rear_offset_cm);
+    }
+
+    HAL_FLASH_Lock();
+}
+
+void Load_Settings_From_Flash(void)
+{
+    uint64_t dw1 = *(__IO uint64_t*)SETTINGS_FLASH_ADDR;
+    uint64_t dw2 = *(__IO uint64_t*)(SETTINGS_FLASH_ADDR + 8);
+
+    uint32_t magic = (uint32_t)(dw1 & 0xFFFFFFFFUL);
+    if (magic == SETTINGS_MAGIC) {
+        unit_mode  = (uint8_t)((dw1 >> 32) & 0xFF);
+        datum_mode = (uint8_t)((dw1 >> 40) & 0xFF);
+
+        uint32_t offset_bits = (uint32_t)(dw2 & 0xFFFFFFFFUL);
+        memcpy(&rear_offset_cm, &offset_bits, sizeof(float));
+
+        // Sanity bounds check
+        if (unit_mode > 3) unit_mode = 0;
+        if (datum_mode > 1) datum_mode = 0;
+        if (rear_offset_cm < 0.0f || rear_offset_cm > 50.0f) rear_offset_cm = 5.5f;
+
+        printf("\r\n>>> [NVM FLASH] Settings Loaded from Flash! Unit:%u, Datum:%u, Offset:%.1fcm <<<\r\n\r\n",
+               unit_mode, datum_mode, rear_offset_cm);
+    } else {
+        printf("\r\n>>> [NVM FLASH] First Boot / No Saved Settings. Using Defaults. <<<\r\n\r\n");
+    }
 }
 
 /* USER CODE END 4 */
