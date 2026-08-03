@@ -22,6 +22,8 @@ typedef struct {
 bool OLED_Init(OLED_HandleTypeDef *dev, I2C_HandleTypeDef *hi2c);
 void OLED_Clear(OLED_HandleTypeDef *dev);
 void OLED_UpdateScreen(OLED_HandleTypeDef *dev);
+void OLED_DisplayOn(OLED_HandleTypeDef *dev);
+void OLED_DisplayOff(OLED_HandleTypeDef *dev);
 void OLED_DrawPixel(OLED_HandleTypeDef *dev, int16_t x, int16_t y, uint8_t color);
 void OLED_DrawLine(OLED_HandleTypeDef *dev, int16_t x1, int16_t y1, int16_t x2, int16_t y2, uint8_t color);
 void OLED_DrawRect(OLED_HandleTypeDef *dev, int16_t x, int16_t y, int16_t w, int16_t h, uint8_t color);

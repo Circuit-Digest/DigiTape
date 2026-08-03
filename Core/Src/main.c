@@ -45,6 +45,7 @@ typedef struct {
     bool     short_press;
     bool     long_press;
     bool     long_press_handled;
+    bool     press_twist; // Press + Twist chorded gesture flag (Switch held while turning knob)
 } Encoder_t;
 
 typedef enum {
@@ -100,6 +101,14 @@ uint32_t last_short_press_tick = 0; // For global double-press detection
 float    laser_pitch_elev = 0.0f;   // Global Laser Pitch Elevation (-Angle X)
 float    side_roll = 0.0f;          // Global Screen Side Roll (Angle Y)
 int16_t  carousel_anim_x = 0;       // Smooth sliding animation offset for fitness band carousel menu
+
+// Auto Sleep & Motion Wakeup Control
+#define AUTO_SLEEP_TIMEOUT_MS  60000UL // 60 Seconds Inactivity Timeout
+bool     device_sleeping = false;
+uint32_t last_activity_tick = 0;
+float    prev_acc_x = 0.0f;
+float    prev_acc_y = 0.0f;
+float    prev_acc_z = 0.0f;
 
 bool     hold_active = false;
 int      hold_distance_mm = -1;
@@ -186,41 +195,49 @@ void Encoder_Update(Encoder_t *e)
         }
     }
 
+    uint8_t curr_sw = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14);
+
     if (dir != 0) {
-        e->counter += dir;
+        if (curr_sw == GPIO_PIN_RESET) {
+            // Press + Twist chorded gesture detected! (Switch held while twisting encoder)
+            e->press_twist = true;
+            e->long_press_handled = true; // Prevent triggering short press on release
+            printf("\r\n>>> [GESTURE DETECTED] Switch Held + Encoder Twist! <<<\r\n\r\n");
+        } else {
+            e->counter += dir;
 
-        if (app_state == APP_STATE_SETTINGS || in_settings) {
-            // Scroll through 3 Settings Items (0: Unit, 1: Datum, 2: Rear Offset)
-            int item = (int)settings_item + dir;
-            if (item < 0) item = 2;
-            if (item > 2) item = 0;
-            settings_item = (uint8_t)item;
-        } else if (app_state == APP_STATE_MENU) {
-            // Scroll through all 8 available modes in fitness band carousel
-            int m = (int)selected_mode + dir;
-            if (m < 0) m = 7;
-            if (m > 7) m = 0;
-            selected_mode = (uint8_t)m;
-            carousel_anim_x = (dir > 0) ? 36 : -36;
-        } else if (app_state == APP_STATE_MEASURE && selected_mode == 7) {
-            // In History Memory Mode, scroll through saved records
-            if (history_count > 0) {
-                int h_idx = (int)history_view_idx + dir;
-                if (h_idx < 0) h_idx = history_count - 1;
-                if (h_idx >= history_count) h_idx = 0;
-                history_view_idx = (uint8_t)h_idx;
+            if (app_state == APP_STATE_SETTINGS || in_settings) {
+                // Scroll through 3 Settings Items (0: Unit, 1: Datum, 2: Rear Offset)
+                int item = (int)settings_item + dir;
+                if (item < 0) item = 2;
+                if (item > 2) item = 0;
+                settings_item = (uint8_t)item;
+            } else if (app_state == APP_STATE_MENU) {
+                // Scroll through all 8 available modes in fitness band carousel
+                int m = (int)selected_mode + dir;
+                if (m < 0) m = 7;
+                if (m > 7) m = 0;
+                selected_mode = (uint8_t)m;
+                carousel_anim_x = (dir > 0) ? 36 : -36;
+            } else if (app_state == APP_STATE_MEASURE && selected_mode == 7) {
+                // In History Memory Mode, scroll through saved records
+                if (history_count > 0) {
+                    int h_idx = (int)history_view_idx + dir;
+                    if (h_idx < 0) h_idx = history_count - 1;
+                    if (h_idx >= history_count) h_idx = 0;
+                    history_view_idx = (uint8_t)h_idx;
+                }
             }
-        }
 
-        printf("\r\n>>> [ENCODER BUMP] Dir: %d | Counter: %ld | Mode: %u | Settings Item: %u <<<\r\n\r\n",
-               dir, (long)e->counter, selected_mode, settings_item);
+            printf("\r\n>>> [ENCODER BUMP] Dir: %d | Counter: %ld | Mode: %u | Settings Item: %u <<<\r\n\r\n",
+                   dir, (long)e->counter, selected_mode, settings_item);
+        }
     }
 
     e->prev_a = curr_a;
     e->prev_b = curr_b;
 
-    // 2. Read Switch Pin (SW = PB14) with Short-Press & Long-Press Detection
-    uint8_t curr_sw = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14);
+    // 2. Short-Press & Long-Press Detection
 
     // Button Pressed Down
     if (e->prev_sw == GPIO_PIN_SET && curr_sw == GPIO_PIN_RESET) {
@@ -245,6 +262,16 @@ void Encoder_Update(Encoder_t *e)
     }
 
     e->prev_sw = curr_sw;
+
+    if (dir != 0 || e->short_press || e->long_press) {
+        last_activity_tick = now;
+        if (device_sleeping) {
+            device_sleeping = false;
+            OLED_DisplayOn(&oled_dev);
+            if (p_vl53) VL53LX_StartMeasurement(p_vl53);
+            printf(" -> [WAKEUP] Encoder Interaction! Display & ToF Active.\r\n");
+        }
+    }
 }
 
 float Calculate_Net_Distance_CM(int raw_mm)
@@ -519,12 +546,14 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    uint32_t now = HAL_GetTick();
+
     // --- 1. Continuous Non-Blocking Polling of Rotary Encoder (SW: PB14, A: PB12, B: PB13) ---
     Encoder_Update(&encoder);
 
     // --- 2. Non-Blocking 33 Hz UI & Telemetry Timer (30 ms) ---
-    if (HAL_GetTick() - last_ui_tick >= 30) {
-        last_ui_tick = HAL_GetTick();
+    if (now - last_ui_tick >= 30) {
+        last_ui_tick = now;
         sample_count++;
 
         if (HAL_GetTick() - blink_tick >= 500) {
@@ -570,6 +599,16 @@ int main(void)
         if (app_state == APP_STATE_MEASURE && selected_mode == 6 && active_net_cm > 0.0f) {
             if (active_net_cm < min_dist_cm) min_dist_cm = active_net_cm;
             if (active_net_cm > max_dist_cm) max_dist_cm = active_net_cm;
+        }
+
+        // --- Handle Press + Twist Chorded Gesture (Switch Held + Encoder Twist -> Global BACK to Main Menu) ---
+        if (encoder.press_twist) {
+            encoder.press_twist = false;
+            app_state = APP_STATE_MENU;
+            in_settings = false;
+            hold_active = false;
+            Reset_Multi_Shot();
+            printf("\r\n>>> [PRESS + TWIST GESTURE: GO BACK TO MAIN MENU] <<<\r\n\r\n");
         }
 
         // --- Handle Switch Presses (Single Press: Select/Action | Double Press: Global BACK to Menu) ---
@@ -666,6 +705,47 @@ int main(void)
             }
         }
 
+        // --- 4. Read SCL3300 Inclinometer & Motion Data ---
+        bool scl_valid = SCL3300_ReadData(&scl_dev);
+        if (scl_valid) {
+            laser_pitch_elev = -scl_dev.angle_x_deg;
+            side_roll        =  scl_dev.angle_y_deg;
+
+            // Motion Acceleration Delta: Detect if user moved or picked up device
+            float delta_acc = fabsf(scl_dev.acc_x_g - prev_acc_x) +
+                              fabsf(scl_dev.acc_y_g - prev_acc_y) +
+                              fabsf(scl_dev.acc_z_g - prev_acc_z);
+            prev_acc_x = scl_dev.acc_x_g;
+            prev_acc_y = scl_dev.acc_y_g;
+            prev_acc_z = scl_dev.acc_z_g;
+
+            if (delta_acc > 0.08f) { // User moved or picked up tool!
+                last_activity_tick = now;
+                if (device_sleeping) {
+                    device_sleeping = false;
+                    OLED_DisplayOn(&oled_dev);
+                    if (p_vl53) VL53LX_StartMeasurement(p_vl53);
+                    printf(" -> [WAKEUP] Motion Pick-up (Delta G: %.3fg)! Display & ToF Active.\r\n", delta_acc);
+                }
+            }
+        }
+
+        // --- 5. Inactivity Timeout Check (60 Seconds Auto-Sleep) ---
+        if (!device_sleeping && (now - last_activity_tick >= AUTO_SLEEP_TIMEOUT_MS)) {
+            device_sleeping = true;
+            laser_active = false;
+            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET); // Laser OFF
+            if (p_vl53) VL53LX_StopMeasurement(p_vl53);           // ToF Low-Power Sleep
+            OLED_DisplayOff(&oled_dev);                          // OLED Sleep (Display OFF)
+            printf(" -> [AUTO-SLEEP] 60s Inactivity. Low-Power Sleep Active.\r\n");
+        }
+
+        // Sleep Idle Loop when sleeping to conserve maximum battery power
+        if (device_sleeping) {
+            HAL_Delay(50);
+            continue;
+        }
+
         // Laser auto-ON in active measurement modes (DIST, HEIGHT, AREA, VOL, CYL, MAXMIN)
         bool should_laser = (app_state == APP_STATE_MEASURE &&
                             (selected_mode == 0 || selected_mode == 2 || selected_mode == 3 || selected_mode == 4 || selected_mode == 5 || selected_mode == 6) &&
@@ -675,16 +755,9 @@ int main(void)
             HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, laser_active ? GPIO_PIN_SET : GPIO_PIN_RESET);
         }
 
-        // --- 3. Read 1S Li-Ion Battery Voltage & Percentage via ADC3 (PB1) ---
+        // --- 6. Read 1S Li-Ion Battery Voltage & Percentage via ADC3 (PB1) ---
         float v_bat = Read_Battery_Voltage();
         uint8_t bat_pct = Calculate_Battery_Percentage(v_bat);
-
-        // --- 4. Read SCL3300 Inclinometer Data ---
-        bool scl_valid = SCL3300_ReadData(&scl_dev);
-
-        // Laser Elevation Pitch Angle: ToF laser points along -X axis -> Elev = -Angle X
-        laser_pitch_elev = -scl_dev.angle_x_deg;
-        side_roll        =  scl_dev.angle_y_deg;
 
         // --- 5. Update 1.3\" OLED Display ---
         if (oled_ok) {

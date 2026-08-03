@@ -178,6 +178,16 @@ void OLED_UpdateScreen(OLED_HandleTypeDef *dev)
     }
 }
 
+void OLED_DisplayOn(OLED_HandleTypeDef *dev)
+{
+    OLED_WriteCommand(dev, 0xAF); // Display ON
+}
+
+void OLED_DisplayOff(OLED_HandleTypeDef *dev)
+{
+    OLED_WriteCommand(dev, 0xAE); // Display OFF (Sleep)
+}
+
 void OLED_DrawPixel(OLED_HandleTypeDef *dev, int16_t x, int16_t y, uint8_t color)
 {
     if (x < 0 || x >= OLED_WIDTH || y < 0 || y >= OLED_HEIGHT) return;
