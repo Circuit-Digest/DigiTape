@@ -112,6 +112,7 @@ float    prev_acc_z = 0.0f;
 
 bool     hold_active = false;
 int      hold_distance_mm = -1;
+float    hold_pitch_elev = 0.0f;
 
 float    min_dist_cm = 9999.0f;
 float    max_dist_cm = 0.0f;
@@ -274,7 +275,55 @@ void Encoder_Update(Encoder_t *e)
     }
 }
 
-float Calculate_Net_Distance_CM(int raw_mm)
+// --- Distance-Adaptive Long-Range Moving Median & EMA Filter ---
+#define TOF_FILTER_WINDOW 7
+static int     tof_window_buf[TOF_FILTER_WINDOW] = {0};
+static uint8_t tof_window_idx = 0;
+static uint8_t tof_window_count = 0;
+static float   filtered_tof_mm = -1.0f;
+
+int Filter_ToF_Distance_MM(int raw_mm)
+{
+    if (raw_mm <= 0) return (int)filtered_tof_mm;
+
+    // 1. Add sample to sliding window buffer
+    tof_window_buf[tof_window_idx] = raw_mm;
+    tof_window_idx = (tof_window_idx + 1) % TOF_FILTER_WINDOW;
+    if (tof_window_count < TOF_FILTER_WINDOW) tof_window_count++;
+
+    // 2. Selection sort to find Median (outlier spike rejection)
+    int sorted[TOF_FILTER_WINDOW];
+    for (uint8_t i = 0; i < tof_window_count; i++) sorted[i] = tof_window_buf[i];
+
+    for (uint8_t i = 0; i < tof_window_count - 1; i++) {
+        for (uint8_t j = i + 1; j < tof_window_count; j++) {
+            if (sorted[i] > sorted[j]) {
+                int tmp = sorted[i];
+                sorted[i] = sorted[j];
+                sorted[j] = tmp;
+            }
+        }
+    }
+
+    int median_mm = sorted[tof_window_count / 2];
+
+    // 3. Distance-Adaptive EMA Filter Weight
+    // At short range (500mm): alpha = 0.60 (Fast response)
+    // At long range (4000mm): alpha = 0.23 (Damped steady)
+    float alpha = 1.0f / (1.0f + 0.0008f * (float)median_mm);
+    if (alpha < 0.08f) alpha = 0.08f;
+    if (alpha > 0.60f) alpha = 0.60f;
+
+    if (filtered_tof_mm < 0.0f) {
+        filtered_tof_mm = (float)median_mm; // Seed initial value
+    } else {
+        filtered_tof_mm = (alpha * (float)median_mm) + ((1.0f - alpha) * filtered_tof_mm);
+    }
+
+    return (int)(filtered_tof_mm + 0.5f);
+}
+
+float Calculate_Net_Distance_CM(int raw_mm, float pitch_elev_deg)
 {
     if (raw_mm < 0) return -1.0f;
     float dist_cm = (float)raw_mm / 10.0f;
@@ -282,7 +331,7 @@ float Calculate_Net_Distance_CM(int raw_mm)
     // Apply ToF Oblique Angle Reflectance & FoV Elongation Correction Factor C(theta)
     // C(theta) = 1.0 - 0.160 * sin^2(theta)
     // Corrects ToF distance stretching at steep tilt angles (e.g. 85.5cm raw -> 75.5cm true at 59 deg tilt)
-    float rad = DEG_TO_RAD(fabsf(laser_pitch_elev));
+    float rad = DEG_TO_RAD(fabsf(pitch_elev_deg));
     float sin_val = sinf(rad);
     float corr_factor = 1.0f - 0.160f * (sin_val * sin_val);
     if (corr_factor < 0.70f) corr_factor = 0.70f;
@@ -514,11 +563,11 @@ int main(void)
       if (vl53_status == VL53LX_ERROR_NONE) {
           // Configure ST internal APIs for 6.0m Maximum Range & High Accuracy
           VL53LX_SetDistanceMode(p_vl53, VL53LX_DISTANCEMODE_LONG);
-          VL53LX_SetMeasurementTimingBudgetMicroSeconds(p_vl53, 100000); // 100ms integration time
+          VL53LX_SetMeasurementTimingBudgetMicroSeconds(p_vl53, 200000); // 200ms integration time for max long-range sensitivity
 
           vl53_status = VL53LX_StartMeasurement(p_vl53);
           if (vl53_status == VL53LX_ERROR_NONE) {
-              printf(" -> [OK] VL53L4CX Measurement Started (LONG Mode, 100ms Budget, 6m Max Range)\r\n");
+              printf(" -> [OK] VL53L4CX Measurement Started (LONG Mode, 200ms Budget, 6m Max Range)\r\n");
           } else {
               printf(" -> [ERROR] VL53LX_StartMeasurement failed: %d\r\n", vl53_status);
           }
@@ -581,8 +630,9 @@ int main(void)
             if (VL53LX_GetMeasurementDataReady(p_vl53, &vl53_ready) == VL53LX_ERROR_NONE && vl53_ready != 0) {
                 if (VL53LX_GetMultiRangingData(p_vl53, &ranging_data) == VL53LX_ERROR_NONE) {
                     num_objects = ranging_data.NumberOfObjectsFound;
-                    if (num_objects > 0) {
-                        live_raw_mm = ranging_data.RangeData[0].RangeMilliMeter;
+                    if (num_objects > 0 && ranging_data.RangeData[0].RangeStatus == 0) {
+                        int raw_inst_mm = ranging_data.RangeData[0].RangeMilliMeter;
+                        live_raw_mm = Filter_ToF_Distance_MM(raw_inst_mm);
                     }
                     VL53LX_ClearInterruptAndStartMeasurement(p_vl53);
                 }
@@ -591,9 +641,10 @@ int main(void)
 
         if (!hold_active && live_raw_mm >= 0) {
             hold_distance_mm = live_raw_mm;
+            hold_pitch_elev  = laser_pitch_elev;
         }
 
-        float active_net_cm = Calculate_Net_Distance_CM(hold_distance_mm);
+        float active_net_cm = Calculate_Net_Distance_CM(hold_distance_mm, hold_pitch_elev);
 
         // Update MAX / MIN Continuous Ranging Tracker in MAXMIN Mode (selected_mode == 6)
         if (app_state == APP_STATE_MEASURE && selected_mode == 6 && active_net_cm > 0.0f) {
@@ -894,7 +945,8 @@ int main(void)
                         Format_Distance_String(active_net_cm, unit_mode, prim_str, sizeof(prim_str));
                     } else if (active_mode == 2) {
                         // HEIGHT Mode (Pythagoras indirect height measurement with 1.8cm ToF vertical mounting offset compensation)
-                        float rad = DEG_TO_RAD(laser_pitch_elev);
+                        float active_pitch = hold_active ? hold_pitch_elev : laser_pitch_elev;
+                        float rad = DEG_TO_RAD(active_pitch);
                         float indirect_height_cm = 0.0f;
                         if (active_net_cm >= 0.0f) {
                             float raw_h = active_net_cm * sinf(rad);
@@ -910,7 +962,7 @@ int main(void)
                         Format_Distance_String(active_net_cm, unit_mode, hyp_str, sizeof(hyp_str));
                         Format_Distance_String(indirect_height_cm, unit_mode, prim_str, sizeof(prim_str));
                         snprintf(sec1, sizeof(sec1), "HYP: %s", hyp_str);
-                        snprintf(sec2, sizeof(sec2), "ANG: %5.1f deg", laser_pitch_elev);
+                        snprintf(sec2, sizeof(sec2), "ANG: %5.1f deg", active_pitch);
                         OLED_DrawStringSmall(&oled_dev, 2, 14, sec1, OLED_COLOR_WHITE);
                         OLED_DrawStringSmall(&oled_dev, 2, 24, sec2, OLED_COLOR_WHITE);
                         OLED_DrawTriangleIcon(&oled_dev, 110, 14);
